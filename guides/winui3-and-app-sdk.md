@@ -32,36 +32,48 @@ WinUI 3 requires an STA thread (`RO_INIT_SINGLETHREADED`) and a Win32 message pu
 - `waitAndPumpWin32Messages(timeoutMs?)` sleeps in the Windows kernel via `MsgWaitForMultipleObjectsEx` at ~0% CPU and wakes in microseconds on input/UI messages.
 - `startWin32MessageLoop(idleYieldMs?)` interleaves `waitAndPumpWin32Messages` with Node.js's libuv loop via `setImmediate` so UI input, promises, timers and `SIGINT` all stay responsive.
 
-## Subclassing `[Composable]` WinRT classes (`composeWinRTClass`)
+## Subclassing `[Composable]` WinRT classes (`class App extends Application`)
 
-WinUI 3 classes such as `Application`, `Window`, `Page` and `UserControl` use COM aggregation (`[Composable]`). `composeWinRTClass` (built on `createWinRTAggregate`) composes any generated composable class with custom override interfaces and delegated interfaces:
+WinUI 3 classes such as `Application`, `Window`, `Page` and `UserControl` use COM aggregation (`[Composable]`). Generated composable classes support direct ES6 `extends` inheritance with typed `override` methods (generated from `[OverridableAttribute]` interfaces in `.winmd`) and `super({ delegates, onError })`:
 
 ```typescript
-import { composeWinRTClass } from "@node-ctypes/winrt";
-import { Application, IApplicationOverrides } from "./winrt/Microsoft.UI.Xaml.ts";
-import { IXamlMetadataProvider } from "./winrt/Microsoft.UI.Xaml.Markup.ts";
+import { bootstrapWindowsAppRuntime, enablePerMonitorDpiAwareness, roInitialize, RO_INIT_SINGLETHREADED } from "@node-ctypes/winrt";
+import { Application, FrameworkElement, Window } from "./winrt/Microsoft.UI.Xaml.ts";
+import { Button, XamlControlsResources } from "./winrt/Microsoft.UI.Xaml.Controls.ts";
+import { IXamlMetadataProvider, XamlReader } from "./winrt/Microsoft.UI.Xaml.Markup.ts";
 import { XamlControlsXamlMetaDataProvider } from "./winrt/Microsoft.UI.Xaml.XamlTypeInfo.ts";
 
-Application.start(() => {
-  const provider = XamlControlsXamlMetaDataProvider.create();
-  composeWinRTClass(Application, {
-    className: "MyNodeWinUIApp.App",
-    delegates: [{ iface: IXamlMetadataProvider, target: provider }],
-    overrides: [
-      {
-        iface: IApplicationOverrides,
-        impl: {
-          OnLaunched(app) {
-            // Load Fluent v2 XamlControlsResources and activate your Window here
-          },
-        },
-      },
-    ],
-  });
-});
+class App extends Application {
+  constructor() {
+    using provider = new XamlControlsXamlMetaDataProvider();
+    super({ delegates: [{ iface: IXamlMetadataProvider, target: provider }] });
+  }
+
+  override onLaunched(): void {
+    using resources = new XamlControlsResources();
+    this.resources?.mergedDictionaries?.append(resources);
+
+    const window = XamlReader.load(XAML)!.as(Window);
+    using content = window.content!.as(FrameworkElement);
+    content
+      .findName("click")!
+      .as(Button)
+      .onClick(() => console.log("Hello, world!"));
+    content
+      .findName("exit")!
+      .as(Button)
+      .onClick(() => this.exit());
+    window.activate();
+  }
+}
+
+enablePerMonitorDpiAwareness();
+roInitialize(RO_INIT_SINGLETHREADED);
+using _ = bootstrapWindowsAppRuntime();
+Application.start(() => new App());
 ```
 
-See [examples/winui3-gallery/index.ts](../examples/winui3-gallery/index.ts) for a complete native WinUI 3 desktop app with `MicaBackdrop`, `NavigationView`, Light/Dark `{ThemeResource}` switching and 30 interactive Fluent v2 controls.
+See [examples/hello-winui3/index.ts](../examples/hello-winui3/index.ts) for this minimal app (direct counterpart to `pywinrt/samples/winui3/hello_app.py`), and [examples/winui3-gallery/index.ts](../examples/winui3-gallery/index.ts) for a full Fluent v2 Controls Gallery with `MicaBackdrop`, `NavigationView` and 30 interactive controls. Lower-level `composeWinRTClass` and `createWinRTAggregate` are also exported for custom scenarios.
 
 ## Registration-free WinRT DLLs
 

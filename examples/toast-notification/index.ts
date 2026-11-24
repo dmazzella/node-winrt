@@ -32,7 +32,7 @@ const xml = `
   </visual>
 </toast>`.trim();
 
-using doc = XmlDocument.create();
+using doc = new XmlDocument();
 doc.loadXml(xml);
 
 using toast = ToastNotification.createToastNotification(doc)!;

@@ -246,6 +246,89 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
   };
 }
 
+export interface WinRTSubclassOptions {
+  /** Runtime class name returned by `IInspectable::GetRuntimeClassName` (defaults to subclass name). */
+  readonly className?: string;
+  /** Additional COM/WinRT interfaces delegated to backing objects (e.g. `IXamlMetadataProvider`). */
+  readonly delegates?: readonly WinRTDelegateSpec[];
+  /** Optional error hook invoked if an override method throws. */
+  readonly onError?: (error: unknown, methodName: string) => void;
+}
+
+export interface WinRTOverrideBinding {
+  /** Override COM interface (e.g. `IApplicationOverrides`). */
+  readonly iface: InterfaceDef<any>;
+  /** Mapping from vtable slot name (e.g. `"OnLaunched"`) to JS method name + raw-arg invoker. */
+  readonly methods: ReadonlyArray<{
+    readonly slot: string;
+    readonly jsName: string;
+    readonly invoke: (self: any, ...rawArgs: any[]) => number | void;
+  }>;
+}
+
+export interface PreparedWinRTSubclass<T extends WinRTObject> {
+  readonly pointer: COMPointer;
+  readonly aggregate: WinRTAggregate;
+  readonly selfRef: { current: T | null };
+}
+
+/**
+ * Prepare COM aggregation for an ES6 subclass of a `[Composable]` WinRT class
+ * (e.g. `class MyApp extends Application`). Inspects `derivedCtor.prototype`
+ * against `baseCtor.prototype` and only wires override interfaces that the
+ * subclass actually overrides; all other interfaces delegate directly to the
+ * inner WinRT object.
+ */
+export function prepareWinRTSubclass<T extends WinRTObject>(
+  derivedCtor: Function,
+  baseCtor: ComposableWinRTClass<T> & { readonly prototype: object; readonly className?: string },
+  overrideBindings: readonly WinRTOverrideBinding[],
+  options?: WinRTSubclassOptions,
+): PreparedWinRTSubclass<T> {
+  const selfRef: { current: T | null } = { current: null };
+  const derivedProto = derivedCtor.prototype as Record<string, unknown>;
+  const baseProto = baseCtor.prototype as Record<string, unknown>;
+  const overrides: WinRTOverrideSpec[] = [];
+
+  for (const binding of overrideBindings) {
+    const impl: Record<string, (...args: any[]) => number | void> = {};
+    let hasAny = false;
+    for (const m of binding.methods) {
+      if (typeof derivedProto[m.jsName] === "function" && derivedProto[m.jsName] !== baseProto[m.jsName]) {
+        hasAny = true;
+        impl[m.slot] = (...rawArgs: any[]) => {
+          const self = selfRef.current;
+          if (!self) return S_OK;
+          return m.invoke(self, ...rawArgs);
+        };
+      }
+    }
+    if (hasAny) overrides.push({ iface: binding.iface, impl });
+  }
+
+  const className = options?.className ?? (derivedCtor.name || `${baseCtor.className ?? "WinRT"}Subclass`);
+  const aggregate = createWinRTAggregate({
+    className,
+    overrides,
+    delegates: options?.delegates,
+    onError: options?.onError,
+  });
+
+  let composed: { readonly instance: T | null; readonly inner: bigint };
+  try {
+    composed = baseCtor.createComposed(aggregate.outerAddress);
+  } catch (err) {
+    aggregate.dispose();
+    throw err;
+  }
+  if (!composed.instance) {
+    aggregate.dispose();
+    throw new Error(`createComposed(${className}) returned NULL`);
+  }
+  aggregate.attachInner(composed.inner);
+  return { pointer: composed.instance.raw, aggregate, selfRef };
+}
+
 export interface ComposableWinRTClass<T extends WinRTObject> {
   createComposed(outer: bigint): { readonly instance: T | null; readonly inner: bigint };
 }

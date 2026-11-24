@@ -859,15 +859,188 @@ function resolveInterfaceExpr(ctx: GenerationContext, fullName: string): { reado
   return null;
 }
 
+interface CallbackParamInfo {
+  readonly tsType: string;
+  readonly wrapLine: string;
+  readonly cleanupLine: string | null;
+}
+
+function marshalCallbackParam(ctx: GenerationContext, type: WinRTTypeRef, rawVar: string, varName: string): CallbackParamInfo {
+  if (type.kind === "primitive") {
+    switch (type.name) {
+      case "Boolean":
+        return { tsType: "boolean", wrapLine: `const ${varName} = Boolean(${rawVar});`, cleanupLine: null };
+      case "String":
+        return { tsType: "string", wrapLine: `const ${varName} = winrt$.readHString(BigInt(${rawVar} ?? 0n));`, cleanupLine: null };
+      case "Int64":
+      case "UInt64":
+      case "IntPtr":
+      case "UIntPtr":
+        return { tsType: "bigint", wrapLine: `const ${varName} = BigInt(${rawVar} ?? 0n);`, cleanupLine: null };
+      case "Object":
+        return {
+          tsType: "winrt$.WinRTObject | null",
+          wrapLine: `const ${varName} = ${rawVar} ? winrt$.WinRTObject.fromAddress(BigInt(${rawVar}), winrt$.IInspectable, true) : null;`,
+          cleanupLine: `if (${varName} && !${varName}.released) ${varName}.raw.Release();`,
+        };
+      default:
+        return { tsType: "number", wrapLine: `const ${varName} = Number(${rawVar});`, cleanupLine: null };
+    }
+  }
+  if (type.kind === "named") {
+    const def = ctx.store.getType(type.fullName);
+    if (def?.kind === "enum") {
+      const eRef = ensureEnumAvailable(ctx, def.fullName).ref;
+      return { tsType: eRef, wrapLine: `const ${varName} = Number(${rawVar}) as ${eRef};`, cleanupLine: null };
+    }
+    if (def?.kind === "struct") {
+      const sRef = ensureStructAvailable(ctx, def.fullName);
+      return {
+        tsType: sRef,
+        wrapLine: `const ${varName} = ${rawVar} instanceof ${sRef} ? ${rawVar} : ${rawVar} instanceof winrt$.ctypes.Structure ? ${sRef}.from_buffer_copy(${rawVar}._buffer) : new ${sRef}();`,
+        cleanupLine: null,
+      };
+    }
+    const cRef = classRefExpr(ctx, type.fullName);
+    if (cRef) {
+      return {
+        tsType: `${cRef} | null`,
+        wrapLine: `const ${varName} = ${rawVar} ? ${cRef}.fromAddress(BigInt(${rawVar}), ${cRef}.defaultInterface, true) : null;`,
+        cleanupLine: `if (${varName} && !${varName}.released) ${varName}.raw.Release();`,
+      };
+    }
+  }
+  return {
+    tsType: "winrt$.WinRTObject | null",
+    wrapLine: `const ${varName} = ${rawVar} ? winrt$.WinRTObject.fromAddress(BigInt(${rawVar}), winrt$.IInspectable, true) : null;`,
+    cleanupLine: `if (${varName} && !${varName}.released) ${varName}.raw.Release();`,
+  };
+}
+
+function isSimpleOverrideMethod(method: WinRTMethod): boolean {
+  if (method.returnType.kind !== "void") return false;
+  if (method.isGetter || method.isSetter || method.isAddEvent || method.isRemoveEvent) return false;
+  for (const p of method.params) {
+    if (p.isArray || p.isOut || p.isByRef) return false;
+    if (p.type.kind === "genericParam") return false;
+  }
+  return true;
+}
+
 function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
   const defaultIfaceInfo = cls.defaultInterface?.kind === "named" ? resolveInterfaceExpr(ctx, cls.defaultInterface.fullName) : null;
   const defaultIfaceExpr = defaultIfaceInfo ? defaultIfaceInfo.expr : "winrt$.IInspectable";
+  const clsIdent = safeIdent(cls.name);
+
+  // Determine whether this class has a public 0-arg composable factory (`create()` + `createComposed(outer)`).
+  let hasZeroArgComposable = false;
+  for (const factoryFullName of cls.composableFactories) {
+    const info = resolveInterfaceExpr(ctx, factoryFullName);
+    if (!info) continue;
+    for (const method of info.def.methods) {
+      if (method.params.length === 2 && method.returnType.kind !== "void" && method.abiName === "CreateInstance") {
+        hasZeroArgComposable = true;
+        break;
+      }
+    }
+    if (hasZeroArgComposable) break;
+  }
+
+  // Collect overridable interfaces (`[OverridableAttribute]`) across this class and its ancestors.
+  const overridableIfaceNames = new Set<string>();
+  const resolvedOverrides: Array<{
+    readonly expr: string;
+    readonly methods: Array<{ readonly slot: string; readonly jsName: string; readonly method: WinRTMethod }>;
+  }> = [];
+  if (hasZeroArgComposable) {
+    const collectOverridables = (refs: readonly WinRTTypeRef[]) => {
+      for (const ref of refs) {
+        if (ref.kind !== "named" || overridableIfaceNames.has(ref.fullName)) continue;
+        overridableIfaceNames.add(ref.fullName);
+        const info = resolveInterfaceExpr(ctx, ref.fullName);
+        if (!info) continue;
+        const slotNames = uniqueSlotNames(info.def.methods);
+        const methods: Array<{ readonly slot: string; readonly jsName: string; readonly method: WinRTMethod }> = [];
+        info.def.methods.forEach((method, idx) => {
+          if (!isSimpleOverrideMethod(method)) return;
+          methods.push({ slot: slotNames[idx], jsName: toCamelCase(method.abiName), method });
+        });
+        if (methods.length > 0) resolvedOverrides.push({ expr: info.expr, methods });
+      }
+    };
+    collectOverridables(cls.overridableInterfaces);
+    let anc = cls.baseClass;
+    while (anc) {
+      const b = ctx.store.getType(anc);
+      if (!b || b.kind !== "class") break;
+      collectOverridables(b.overridableInterfaces);
+      anc = b.baseClass;
+    }
+  }
 
   const lines: string[] = [];
   lines.push(`/** WinRT RuntimeClass ${cls.fullName} */`);
-  lines.push(`export class ${safeIdent(cls.name)} extends winrt$.WinRTObject {`);
+  lines.push(`export class ${clsIdent} extends winrt$.WinRTObject {`);
   lines.push(`  static readonly className = ${JSON.stringify(cls.fullName)};`);
   lines.push(`  static get defaultInterface() { return ${defaultIfaceExpr}; }`);
+
+  // Ergonomic constructor: `new MyClass()` or `class Sub extends MyClass { constructor() { super({ delegates }); } }`.
+  if (hasZeroArgComposable) {
+    lines.push(`  constructor(pointerOrOptions?: winrt$.comtypes.COMPointer | winrt$.WinRTSubclassOptions) {`);
+    lines.push(`    if (pointerOrOptions instanceof winrt$.comtypes.COMPointer) {`);
+    lines.push(`      super(pointerOrOptions);`);
+    lines.push(`      return;`);
+    lines.push(`    }`);
+    lines.push(`    if (new.target === ${clsIdent}) {`);
+    lines.push(`      const created$ = ${clsIdent}.create();`);
+    lines.push(`      if (!created$) throw new Error(${JSON.stringify(`${cls.name}.create() returned NULL`)});`);
+    lines.push(`      super(created$.raw);`);
+    lines.push(`      return;`);
+    lines.push(`    }`);
+    lines.push(`    const prepared$ = winrt$.prepareWinRTSubclass<${clsIdent}>(`);
+    lines.push(`      new.target,`);
+    lines.push(`      ${clsIdent},`);
+    lines.push(`      [`);
+    for (const ov of resolvedOverrides) {
+      lines.push(`        {`);
+      lines.push(`          iface: ${ov.expr},`);
+      lines.push(`          methods: [`);
+      for (const m of ov.methods) {
+        const rawVars = m.method.params.map((_, i) => `a${i}$`);
+        const mapped = m.method.params.map((p, i) => marshalCallbackParam(ctx, p.type, rawVars[i], `p${i}$`));
+        const cleanups = mapped.map((x) => x.cleanupLine).filter((x): x is string => x !== null);
+        const pVars = m.method.params.map((_, i) => `p${i}$`);
+        lines.push(`            {`);
+        lines.push(`              slot: ${JSON.stringify(m.slot)},`);
+        lines.push(`              jsName: ${JSON.stringify(m.jsName)},`);
+        lines.push(`              invoke: (self$, ${rawVars.join(", ")}) => {`);
+        for (const x of mapped) lines.push(`                ${x.wrapLine}`);
+        if (cleanups.length > 0) {
+          lines.push(`                try {`);
+          lines.push(`                  self$.${m.jsName}(${pVars.join(", ")});`);
+          lines.push(`                } finally {`);
+          for (const c of cleanups) lines.push(`                  ${c}`);
+          lines.push(`                }`);
+        } else {
+          lines.push(`                self$.${m.jsName}(${pVars.join(", ")});`);
+        }
+        lines.push(`              },`);
+        lines.push(`            },`);
+      }
+      lines.push(`          ],`);
+      lines.push(`        },`);
+    }
+    lines.push(`      ],`);
+    lines.push(`      pointerOrOptions,`);
+    lines.push(`    );`);
+    lines.push(`    super(prepared$.pointer, prepared$.aggregate);`);
+    lines.push(`    prepared$.selfRef.current = this;`);
+    lines.push(`  }`);
+  } else if (cls.hasDefaultConstructor) {
+    lines.push(`  constructor(pointer?: winrt$.comtypes.COMPointer) {`);
+    lines.push(`    super(pointer instanceof winrt$.comtypes.COMPointer ? pointer : winrt$.activateInstance(${clsIdent}.className, ${defaultIfaceExpr}));`);
+    lines.push(`  }`);
+  }
 
   const emittedStatic = new Set<string>(["className", "defaultInterface", "fromAddress", "prototype", "length", "name"]);
 
@@ -1016,9 +1189,23 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
   const emittedGetters = new Set<string>();
   const emittedSetters = new Set<string>();
 
+  // Emit typed overridable hooks for `[OverridableAttribute]` interfaces on composable classes.
+  for (const ov of resolvedOverrides) {
+    for (const m of ov.methods) {
+      if (emittedInstance.has(m.jsName)) continue;
+      emittedInstance.add(m.jsName);
+      const paramSigs = m.method.params.map((p, i) => {
+        const info = marshalCallbackParam(ctx, p.type, `a${i}$`, `p${i}$`);
+        return `_${safeIdent(p.name || `arg${i}`)}: ${info.tsType}`;
+      });
+      lines.push(`  ${m.jsName}(${paramSigs.join(", ")}): void {}`);
+    }
+  }
+
   for (const ifaceRef of orderedIfaces) {
     if (ifaceRef.kind !== "named") continue;
     if (ifaceRef.fullName === "Windows.Foundation.IClosable") continue;
+    if (overridableIfaceNames.has(ifaceRef.fullName)) continue;
     const info = resolveInterfaceExpr(ctx, ifaceRef.fullName);
     if (!info) continue;
     const isDefault = defaultIfaceInfo !== null && info.def.fullName === defaultIfaceInfo.def.fullName;
@@ -1044,19 +1231,19 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
 
         const handlerType = method.params[0].type;
         let handlerIid: string | null = null;
-        let arity: 0 | 1 | 2 = 2;
+        let eventParamTypes: WinRTTypeRef[] = [];
 
         if (handlerType.kind === "genericInst" && handlerType.fullName === "Windows.Foundation.TypedEventHandler`2") {
           try {
             handlerIid = typedEventHandlerPiid(ctx.store.typeSignature(handlerType.args[0]), ctx.store.typeSignature(handlerType.args[1]));
-            arity = 2;
+            eventParamTypes = [handlerType.args[0], handlerType.args[1]];
           } catch {
             return;
           }
         } else if (handlerType.kind === "genericInst" && handlerType.fullName === "Windows.Foundation.EventHandler`1") {
           try {
             handlerIid = eventHandlerPiid(ctx.store.typeSignature(handlerType.args[0]));
-            arity = 2;
+            eventParamTypes = [{ kind: "primitive", name: "Object" }, handlerType.args[0]];
           } catch {
             return;
           }
@@ -1066,21 +1253,24 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
             const pCount = dDef.invoke.params.length;
             if (pCount === 0 || pCount === 1 || pCount === 2) {
               handlerIid = dDef.guid;
-              arity = pCount;
+              eventParamTypes = dDef.invoke.params.map((p) => p.type);
             }
           }
         }
 
         if (!handlerIid) return;
+        const arity = eventParamTypes.length as 0 | 1 | 2;
         emittedInstance.add(jsEventMethod);
         const tokenStruct = ensureStructAvailable(ctx, "Windows.Foundation.EventRegistrationToken");
-        const cbSig = arity === 0 ? "() => void" : arity === 1 ? "(argAddr: bigint) => void" : "(senderAddr: bigint, argsAddr: bigint) => void";
-        const guardedCb =
-          arity === 0
-            ? `() => { if (!removed$ && !this.released) callback(); }`
-            : arity === 1
-              ? `(a0$: bigint) => { if (!removed$ && !this.released) callback(a0$); }`
-              : `(a0$: bigint, a1$: bigint) => { if (!removed$ && !this.released) callback(a0$, a1$); }`;
+        const paramNames = arity === 0 ? [] : arity === 1 ? ["arg"] : ["sender", "args"];
+        const mappedParams = eventParamTypes.map((t, i) => marshalCallbackParam(ctx, t, `a${i}$`, `p${i}$`));
+        const cbSig = `(${mappedParams.map((p, i) => `${paramNames[i]}: ${p.tsType}`).join(", ")}) => void`;
+        const cleanups = mappedParams.map((p) => p.cleanupLine).filter((c): c is string => c !== null);
+        const rawParamList = eventParamTypes.map((_, i) => `a${i}$: bigint`).join(", ");
+        const pVarList = eventParamTypes.map((_, i) => `p${i}$`).join(", ");
+        const wrapStmts = mappedParams.map((p) => p.wrapLine).join(" ");
+        const callBody = cleanups.length > 0 ? `${wrapStmts} try { callback(${pVarList}); } finally { ${cleanups.join(" ")} }` : `${wrapStmts} callback(${pVarList});`;
+        const guardedCb = `(${rawParamList}) => { if (removed$ || this.released) return; ${callBody} }`;
         const factoryCall = arity === 2 ? `winrt$.createTypedEventHandler(${JSON.stringify(handlerIid)}, ${guardedCb})` : `winrt$.createDelegateHandler(${JSON.stringify(handlerIid)}, ${arity}, (${guardedCb}) as (...args: bigint[]) => void)`;
         lines.push(`  ${jsEventMethod}(callback: ${cbSig}): Disposable & { readonly token: bigint; remove: () => void } {`);
         lines.push(`    let removed$ = false;`);

@@ -10,9 +10,11 @@ import { getRuntimeClassName, IInspectable, tryClose } from "./native.ts";
  */
 export class WinRTObject implements Disposable {
   readonly raw: COMPointer;
+  #aggregate: Disposable | null;
 
-  constructor(pointer: COMPointer) {
+  constructor(pointer: COMPointer, aggregate: Disposable | null = null) {
     this.raw = pointer;
+    this.#aggregate = aggregate;
   }
 
   /** Adopt a raw native interface pointer address (takes ownership of 1 reference). */
@@ -57,11 +59,17 @@ export class WinRTObject implements Disposable {
     return getRuntimeClassName(this.raw);
   }
 
-  /** Close (`IClosable::Close` when supported) and release the COM reference. */
+  /** Close (`IClosable::Close` when supported), release the COM reference, and dispose any attached COM aggregate. */
   dispose(): void {
-    if (this.raw.released) return;
-    tryClose(this.raw);
-    this.raw.Release();
+    if (!this.raw.released) {
+      tryClose(this.raw);
+      this.raw.Release();
+    }
+    if (this.#aggregate) {
+      const agg = this.#aggregate;
+      this.#aggregate = null;
+      agg[Symbol.dispose]();
+    }
   }
 
   [Symbol.dispose](): void {

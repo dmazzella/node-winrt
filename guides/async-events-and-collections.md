@@ -19,16 +19,18 @@ On settlement (success, cancellation, error or timeout), `IAsyncInfo::Close()` a
 
 ## Events and WinRT delegates
 
-Generated runtime classes emit ergonomic `on<Event>(callback)` methods for `TypedEventHandler<TSender, TArgs>`, `EventHandler<T>`, and custom 0/1/2-arg WinRT delegates:
+Generated runtime classes emit ergonomic, **typed** `on<Event>((sender, args) => ...)` methods for `TypedEventHandler<TSender, TArgs>`, `EventHandler<T>`, and custom 0/1/2-arg WinRT delegates:
 
 ```typescript
-using subscription = watcher.onReceived((_senderAddr, argsAddr) => {
-  using args = BluetoothLEAdvertisementReceivedEventArgs.fromAddress(argsAddr, BluetoothLEAdvertisementReceivedEventArgs.defaultInterface, true);
+using watcher = new BluetoothLEAdvertisementWatcher();
+using subscription = watcher.onReceived((_sender, args) => {
+  if (!args) return;
   console.log(args.bluetoothAddress.toString(16), args.rawSignalStrengthInDBm);
 });
 // Disposing `subscription` calls `remove_Received(token)` and releases the COM delegate.
 ```
 
+- `sender` and `args` are automatically wrapped in their projected `WinRTObject` subclasses as borrowed references and released automatically after the callback returns (use `.as(Class)` to retain an owned reference beyond the callback).
 - Delegates are free-threaded (`IAgileObject`) and cached per IID so repeated subscriptions do not rebuild vtables.
 - If `add_<Event>` fails, the temporary COM delegate is released immediately so it never leaks.
 - Methods taking a WinRT delegate parameter directly (such as `Application.start(callback)`) accept a plain JavaScript function directly, automatically wrapped via `createDelegateHandler`.

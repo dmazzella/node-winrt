@@ -8,7 +8,7 @@
  *   node examples/bluetooth-scan/index.ts
  *   node examples/bluetooth-scan/index.ts --duration 10000
  */
-import { BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementWatcherStatus, BluetoothLEScanningMode } from "./winrt/Windows.Devices.Bluetooth.Advertisement.ts";
+import { BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementWatcherStatus, BluetoothLEScanningMode } from "./winrt/Windows.Devices.Bluetooth.Advertisement.ts";
 
 function formatMac(addr: bigint): string {
   return addr.toString(16).padStart(12, "0").toUpperCase().match(/.{2}/g)!.join(":");
@@ -17,14 +17,13 @@ function formatMac(addr: bigint): string {
 const durIdx = process.argv.indexOf("--duration");
 const durationMs = durIdx !== -1 ? Math.max(500, Number(process.argv[durIdx + 1]) || 5000) : 5000;
 
-using watcher = BluetoothLEAdvertisementWatcher.create();
+using watcher = new BluetoothLEAdvertisementWatcher();
 watcher.scanningMode = BluetoothLEScanningMode.Active;
 
 const seen = new Map<string, { name: string; rssi: number; count: number }>();
 
-using _onReceived = watcher.onReceived((_senderAddr, argsAddr) => {
-  if (!argsAddr) return;
-  using args = BluetoothLEAdvertisementReceivedEventArgs.fromAddress(argsAddr, BluetoothLEAdvertisementReceivedEventArgs.defaultInterface, true);
+using _onReceived = watcher.onReceived((_sender, args) => {
+  if (!args) return;
   const mac = formatMac(args.bluetoothAddress);
   const rssi = args.rawSignalStrengthInDBm;
   using adv = args.advertisement;

@@ -55,8 +55,8 @@ export {
 } from "./runtime/async.ts";
 export type { AwaitAsyncOptions } from "./runtime/async.ts";
 
-export { composeWinRTClass, createWinRTAggregate } from "./runtime/aggregate.ts";
-export type { ComposableWinRTClass, ComposedWinRTInstance, WinRTAggregate, WinRTAggregateOptions, WinRTDelegateSpec, WinRTOverrideSpec } from "./runtime/aggregate.ts";
+export { composeWinRTClass, createWinRTAggregate, prepareWinRTSubclass } from "./runtime/aggregate.ts";
+export type { ComposableWinRTClass, ComposedWinRTInstance, PreparedWinRTSubclass, WinRTAggregate, WinRTAggregateOptions, WinRTDelegateSpec, WinRTOverrideBinding, WinRTOverrideSpec, WinRTSubclassOptions } from "./runtime/aggregate.ts";
 
 export {
   bootstrapWindowsAppRuntime,

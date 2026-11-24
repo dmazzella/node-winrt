@@ -87,6 +87,7 @@ export interface WinRTClassDef {
   readonly baseClass: string | null;
   readonly defaultInterface: WinRTTypeRef | null;
   readonly interfaces: readonly WinRTTypeRef[];
+  readonly overridableInterfaces: readonly WinRTTypeRef[];
   readonly staticInterfaces: readonly string[];
   readonly factoryInterfaces: readonly string[];
   readonly composableFactories: readonly string[];
@@ -599,6 +600,7 @@ export class WinMdStore {
         // Runtime class (extends System.Object or another runtime class).
         const impls = implsByClass.get(row) ?? [];
         const interfaces: WinRTTypeRef[] = [];
+        const overridableInterfaces: WinRTTypeRef[] = [];
         let defaultInterface: WinRTTypeRef | null = null;
         let isClosable = false;
 
@@ -607,8 +609,13 @@ export class WinMdStore {
           interfaces.push(ref);
           if (ref.kind === "named" && ref.fullName === "Windows.Foundation.IClosable") isClosable = true;
           const implAttrs = attrsByParent.get(`${TableId.InterfaceImpl}:${impl.row}`) ?? [];
-          if (implAttrs.some((a) => getAttrName(a) === "Windows.Foundation.Metadata.DefaultAttribute")) {
-            defaultInterface = ref;
+          for (const a of implAttrs) {
+            const aName = getAttrName(a);
+            if (aName === "Windows.Foundation.Metadata.DefaultAttribute") {
+              defaultInterface = ref;
+            } else if (aName === "Windows.Foundation.Metadata.OverridableAttribute") {
+              overridableInterfaces.push(ref);
+            }
           }
         }
         if (!defaultInterface && interfaces.length > 0) defaultInterface = interfaces[0];
@@ -623,6 +630,7 @@ export class WinMdStore {
           baseClass,
           defaultInterface,
           interfaces,
+          overridableInterfaces,
           staticInterfaces,
           factoryInterfaces,
           composableFactories,

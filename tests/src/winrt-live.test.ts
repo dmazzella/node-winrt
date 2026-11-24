@@ -92,7 +92,7 @@ describe("Generated WinRT projections live on Windows", { skip: process.platform
       reader.readBytes(filled);
       assert.deepEqual(filled, rawBytes);
 
-      using memStream = streams.InMemoryRandomAccessStream.create();
+      using memStream = new streams.InMemoryRandomAccessStream();
       const writtenCount = await memStream.writeAsync(cryptoBuf);
       assert.equal(writtenCount, rawBytes.length);
       assert.equal(memStream.size, BigInt(rawBytes.length));
