@@ -1,4 +1,4 @@
-import { addressof, array, c_int32, c_uint32, c_void_p, memmove, sizeof, WINFUNCTYPE, writeValue } from "node-ctypes";
+import { addressof, array, c_int32, c_uint32, c_void_p, memmove, WINFUNCTYPE, writeValue } from "node-ctypes";
 import { COMInterface, COMPointer, E_FAIL, E_NOINTERFACE, HRESULT, S_OK, STDMETHOD, sync } from "@node-ctypes/comtypes";
 import type { InterfaceDef } from "@node-ctypes/comtypes";
 import { createHString } from "./native.ts";
@@ -6,7 +6,8 @@ import { WinRTObject } from "./object.ts";
 
 const IID_IUnknown = "{00000000-0000-0000-C000-000000000046}";
 const IID_IInspectable = "{AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90}";
-const PTR_SIZE = sizeof(c_void_p);
+const guidScratch = Buffer.allocUnsafe(16);
+const zero4 = Buffer.alloc(4);
 
 const IUnknownRaw = COMInterface({
   name: "IUnknownRaw",
@@ -15,20 +16,17 @@ const IUnknownRaw = COMInterface({
 });
 
 function readGuidUpper(riidAddr: bigint): string {
-  const buf = Buffer.alloc(16);
-  memmove(buf, riidAddr, 16);
-  const a = buf.readUInt32LE(0).toString(16).padStart(8, "0");
-  const b = buf.readUInt16LE(4).toString(16).padStart(4, "0");
-  const c = buf.readUInt16LE(6).toString(16).padStart(4, "0");
-  const d = buf.subarray(8, 10).toString("hex");
-  const e = buf.subarray(10, 16).toString("hex");
+  memmove(guidScratch, riidAddr, 16);
+  const a = guidScratch.readUInt32LE(0).toString(16).padStart(8, "0");
+  const b = guidScratch.readUInt16LE(4).toString(16).padStart(4, "0");
+  const c = guidScratch.readUInt16LE(6).toString(16).padStart(4, "0");
+  const d = guidScratch.subarray(8, 10).toString("hex");
+  const e = guidScratch.subarray(10, 16).toString("hex");
   return `{${a}-${b}-${c}-${d}-${e}}`.toUpperCase();
 }
 
 function writeOutPointer(outAddr: bigint, value: bigint): void {
-  const tmp = Buffer.alloc(PTR_SIZE);
-  writeValue(tmp, c_void_p, value, 0);
-  memmove(outAddr, tmp, PTR_SIZE);
+  writeValue(outAddr, c_void_p, value);
 }
 
 export interface WinRTOverrideSpec {
@@ -77,13 +75,14 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
   let disposed = false;
   let innerUnknown: COMPointer<typeof IUnknownRaw> | null = null;
   const keepAlive: unknown[] = [];
+  const callbacks: Array<{ release?: () => void }> = [];
 
-  const makeComBlock = (callbacks: ReadonlyArray<{ readonly pointer: bigint }>): bigint => {
-    const VtableType = array(c_void_p, callbacks.length);
+  const makeComBlock = (slotCallbacks: ReadonlyArray<{ readonly pointer: bigint; release?: () => void }>): bigint => {
+    const VtableType = array(c_void_p, slotCallbacks.length);
     const vtable = new VtableType();
-    for (let i = 0; i < callbacks.length; i++) {
-      keepAlive.push(callbacks[i]);
-      vtable[i] = callbacks[i].pointer;
+    for (let i = 0; i < slotCallbacks.length; i++) {
+      keepAlive.push(slotCallbacks[i]);
+      vtable[i] = slotCallbacks[i].pointer;
     }
     const block = new c_void_p(addressof(vtable));
     keepAlive.push(vtable, block);
@@ -153,7 +152,7 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
     c_void_p,
     c_void_p,
   )((_self, countPtr, iidsPtr) => {
-    if (countPtr) memmove(BigInt(countPtr), Buffer.alloc(4), 4);
+    if (countPtr) memmove(BigInt(countPtr), zero4, 4);
     if (iidsPtr) writeOutPointer(BigInt(iidsPtr), 0n);
     return S_OK;
   });
@@ -170,11 +169,12 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
     c_void_p,
     c_void_p,
   )((_self, outPtr) => {
-    if (outPtr) memmove(BigInt(outPtr), Buffer.alloc(4), 4);
+    if (outPtr) memmove(BigInt(outPtr), zero4, 4);
     return S_OK;
   });
 
   const inspectableSlots = [qiCb, addRefCb, releaseCb, getIidsCb, getNameCb, getTrustCb] as const;
+  callbacks.push(...inspectableSlots);
   outerInspectableAddr = makeComBlock(inspectableSlots);
 
   for (const spec of options.overrides ?? []) {
@@ -204,6 +204,7 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
           return E_FAIL;
         }
       });
+      callbacks.push(cb);
       slots.push(cb);
     }
     overrideBlocks.set(spec.iface.iid.toString().toUpperCase(), makeComBlock(slots));
@@ -226,6 +227,15 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
       if (!d.released) d.Release();
     }
     delegateMap.clear();
+    overrideBlocks.clear();
+    for (const cb of callbacks.splice(0)) {
+      try {
+        cb.release?.();
+      } catch {
+        // Ignore already-released callback.
+      }
+    }
+    keepAlive.length = 0;
   };
 
   return {
@@ -277,7 +287,13 @@ export function composeWinRTClass<T extends WinRTObject>(
     delegates: options.delegates,
     onError: options.onError,
   });
-  const composed = TargetClass.createComposed(aggregate.outerAddress);
+  let composed: { readonly instance: T | null; readonly inner: bigint };
+  try {
+    composed = TargetClass.createComposed(aggregate.outerAddress);
+  } catch (err) {
+    aggregate.dispose();
+    throw err;
+  }
   if (!composed.instance) {
     aggregate.dispose();
     throw new Error(`createComposed(${options.className}) returned NULL`);

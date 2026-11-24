@@ -41,6 +41,8 @@ export function normalizeGuidUpper(guid: string): string {
   return normalizeGuidLower(guid).toUpperCase();
 }
 
+const piidCache = new Map<string, string>();
+
 /**
  * Compute the deterministic WinRT Parameterized Interface IID (PIID) using
  * UUIDv5 (SHA-1) over `signature` under the WinRT namespace UUID.
@@ -52,12 +54,16 @@ export function normalizeGuidUpper(guid: string): string {
  * ```
  */
 export function computePiid(signature: string): string {
+  const cached = piidCache.get(signature);
+  if (cached !== undefined) return cached;
   const hash = createHash("sha1").update(WINRT_PIID_NAMESPACE).update(signature, "utf8").digest();
   // RFC 4122 version 5 (SHA-1) and variant 1 (10xx).
   hash[6] = (hash[6] & 0x0f) | 0x50;
   hash[8] = (hash[8] & 0x3f) | 0x80;
   const hex = hash.subarray(0, 16).toString("hex").toUpperCase();
-  return `{${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}}`;
+  const piid = `{${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}}`;
+  piidCache.set(signature, piid);
+  return piid;
 }
 
 /** Build a `pinterface({guid};arg1;arg2;...)` WinRT type signature. */

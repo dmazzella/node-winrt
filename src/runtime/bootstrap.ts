@@ -245,13 +245,13 @@ interface User32PumpApi {
   readonly TranslateMessage: (msg: Buffer) => number;
   readonly DispatchMessageW: (msg: Buffer) => bigint;
   readonly MsgWaitForMultipleObjectsEx: (count: number, handles: null, timeoutMs: number, wakeMask: number, flags: number) => number;
-  readonly msg: Win32Msg;
 }
 
 const QS_ALLINPUT = 0x04ff;
 const MWMO_INPUTAVAILABLE = 0x0004;
 
 let pumpApi: User32PumpApi | null = null;
+const msgPool: Win32Msg[] = [];
 
 function getPumpApi(): User32PumpApi {
   if (!pumpApi) {
@@ -261,7 +261,6 @@ function getPumpApi(): User32PumpApi {
       TranslateMessage: user32.func("TranslateMessage", c_int, [c_void_p]) as User32PumpApi["TranslateMessage"],
       DispatchMessageW: user32.func("DispatchMessageW", c_void_p, [c_void_p]) as User32PumpApi["DispatchMessageW"],
       MsgWaitForMultipleObjectsEx: user32.func("MsgWaitForMultipleObjectsEx", c_uint32, [c_uint32, c_void_p, c_uint32, c_uint32, c_uint32]) as User32PumpApi["MsgWaitForMultipleObjectsEx"],
-      msg: new Win32Msg(),
     };
   }
   return pumpApi;
@@ -269,7 +268,7 @@ function getPumpApi(): User32PumpApi {
 
 /**
  * Drain all currently queued Win32 messages on the calling STA thread
- * (`PeekMessageW` + `TranslateMessage` + `DispatchMessageW`).
+ * (`PeekMessageW` + `TranslateMessage` + `DispatchMessageW`). Re-entrant safe.
  *
  * Useful when hosting WinUI 3 (`Microsoft.UI.Xaml`) or `AppWindow` on a Node.js
  * STA thread alongside the libuv event loop.
@@ -277,11 +276,17 @@ function getPumpApi(): User32PumpApi {
 export function pumpWin32Messages(): number {
   if (process.platform !== "win32") return 0;
   const api = getPumpApi();
+  // Re-entrant safe: nested pumps during DispatchMessageW borrow their own MSG buffer.
+  const msg = msgPool.pop() ?? new Win32Msg();
   let count = 0;
-  while (api.PeekMessageW(api.msg._buffer, null, 0, 0, 1)) {
-    api.TranslateMessage(api.msg._buffer);
-    api.DispatchMessageW(api.msg._buffer);
-    count++;
+  try {
+    while (api.PeekMessageW(msg._buffer, null, 0, 0, 1)) {
+      api.TranslateMessage(msg._buffer);
+      api.DispatchMessageW(msg._buffer);
+      count++;
+    }
+  } finally {
+    if (msgPool.length < 4) msgPool.push(msg);
   }
   return count;
 }

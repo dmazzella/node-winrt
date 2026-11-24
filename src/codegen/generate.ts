@@ -1012,7 +1012,7 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
     ancestorName = baseDef.baseClass;
   }
 
-  const emittedInstance = new Set<string>(["raw", "address", "released", "queryInterface", "tryQueryInterface", "getRuntimeClassName", "dispose", "constructor"]);
+  const emittedInstance = new Set<string>(["raw", "address", "released", "queryInterface", "tryQueryInterface", "as", "tryAs", "getRuntimeClassName", "dispose", "constructor"]);
   const emittedGetters = new Set<string>();
   const emittedSetters = new Set<string>();
 
@@ -1086,9 +1086,14 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
         lines.push(`    let removed$ = false;`);
         lines.push(`    const handler$ = ${factoryCall};`);
         lines.push(`    const token$ = new ${tokenStruct}();`);
+        lines.push(`    try {`);
         for (const l of wrapTarget((t) => [`winrt$.comtypes.sync(${t}).${slotNames[idx]}(handler$.address, token$._buffer);`])) {
-          lines.push(`    ${l}`);
+          lines.push(`      ${l}`);
         }
+        lines.push(`    } catch (err$) {`);
+        lines.push(`      if (!handler$.released) handler$.Release();`);
+        lines.push(`      throw err$;`);
+        lines.push(`    }`);
         lines.push(`    const regToken$ = BigInt(token$.Value);`);
         lines.push(`    const remove = (): void => {`);
         lines.push(`      if (removed$) return;`);

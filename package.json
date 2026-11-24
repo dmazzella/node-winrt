@@ -62,7 +62,10 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "test:types": "tsc -p tests/tsconfig.json && tsc -p tests/types/tsconfig.json",
     "test": "npm run build && npm run test:types && node --test --test-concurrency=1 \"tests/checks/*.test.ts\" \"tests/src/*.test.ts\"",
+    "test:mirror": "npm run build && node -e \"const { spawnSync } = require('node:child_process'); const r = spawnSync(process.execPath, ['--test', '--test-concurrency=1', 'tests/checks/*.test.ts', 'tests/src/*.test.ts'], { stdio: 'inherit', env: { ...process.env, NODE_CTYPES_NO_EXTERNAL_BUFFERS: '1' } }); process.exit(r.status ?? 1);\"",
     "test:unit": "npm run build && node --test \"tests/checks/*.test.ts\"",
+    "docs": "typedoc",
+    "docs:serve": "typedoc && npx serve docs",
     "demo:winui3:gen": "node dist/cli.js generate Windows.Foundation Microsoft.UI Microsoft.UI.Windowing Microsoft.UI.Xaml Microsoft.UI.Xaml.Controls Microsoft.UI.Xaml.Controls.Primitives Microsoft.UI.Xaml.Markup Microsoft.UI.Xaml.Media Microsoft.UI.Xaml.XamlTypeInfo --winapp --only Microsoft.UI.Xaml:Application,IApplicationOverrides,ResourceDictionary,Window,UIElement,FrameworkElement,IUIElement,IFrameworkElement --only Microsoft.UI.Xaml.Media:SystemBackdrop,MicaBackdrop,ISystemBackdrop,IMicaBackdrop --only Microsoft.UI.Xaml.Controls:XamlControlsResources,NavigationView,NavigationViewItem,NavigationViewSelectionChangedEventArgs,ScrollViewer,TextBlock,TextBox,PasswordBox,NumberBox,AutoSuggestBox,Button,CheckBox,RadioButton,ToggleSwitch,Slider,ProgressBar,ProgressRing,RatingControl,InfoBar,Expander,ComboBox,ListView,ColorPicker,MenuFlyoutItem,ToggleMenuFlyoutItem,SplitButton --only Microsoft.UI.Xaml.Controls.Primitives:ToggleButton,RepeatButton,IButtonBase,IRangeBase,IToggleButton,IRepeatButton,ISelector --out examples/winui3-gallery/winrt",
     "demo:winui3": "node examples/winui3-gallery/index.ts",
     "demo:hello:gen": "node dist/cli.js generate Windows.Security.Credentials.UI --out examples/windows-hello/winrt",
@@ -78,10 +81,11 @@
   },
   "dependencies": {
     "@node-ctypes/comtypes": "^0.3.1",
-    "node-ctypes": "^2.15.2"
+    "node-ctypes": "^2.15.5"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "typedoc": "^0.28.20",
     "typescript": "~6.0.3"
   }
 }

@@ -35,11 +35,7 @@ export class WinRTObject implements Disposable {
 
   /** Try `QueryInterface`, returning `null` if the interface is not supported. */
   tryQueryInterface<I extends InterfaceDef<any>>(iface: I): InterfacePointer<I> | null {
-    try {
-      return this.raw.QueryInterface(iface);
-    } catch {
-      return null;
-    }
+    return this.raw.tryQueryInterface(iface);
   }
 
   /**
@@ -52,11 +48,8 @@ export class WinRTObject implements Disposable {
 
   /** Like {@link as}, returning `null` if the object does not implement `TargetClass`. */
   tryAs<T extends WinRTObject>(TargetClass: (new (pointer: COMPointer) => T) & { readonly defaultInterface: InterfaceDef<any> }): T | null {
-    try {
-      return this.as(TargetClass);
-    } catch {
-      return null;
-    }
+    const ptr = this.raw.tryQueryInterface(TargetClass.defaultInterface);
+    return ptr ? new TargetClass(ptr) : null;
   }
 
   /** Return the concrete WinRT runtime class name (`IInspectable::GetRuntimeClassName`). */

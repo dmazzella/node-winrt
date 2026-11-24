@@ -182,14 +182,19 @@ export function roInitialize(initType: number = RO_INIT_MULTITHREADED): void {
   roInitialized = true;
 }
 
+const hstringOut = new c_void_p(0n);
+const hstringOutRef = byref(hstringOut);
+const hstringLenOut = new c_uint32(0);
+const hstringLenOutRef = byref(hstringLenOut);
+
 /** Allocate a WinRT `HSTRING` from a JavaScript string. Free with {@link deleteHString}. */
 export function createHString(text: string): bigint {
   roInitialize();
   if (text.length === 0) return 0n;
   const utf16 = Buffer.from(`${text}\0`, "utf16le");
-  const out = new c_void_p(0n);
-  checkHRESULT(combase().WindowsCreateString(utf16, text.length, byref(out)), "WindowsCreateString");
-  return BigInt(out.value ?? 0n);
+  hstringOut.value = 0n;
+  checkHRESULT(combase().WindowsCreateString(utf16, text.length, hstringOutRef), "WindowsCreateString");
+  return BigInt(hstringOut.value ?? 0n);
 }
 
 /** Free a WinRT `HSTRING` handle (`0n` is a no-op). */
@@ -211,9 +216,9 @@ export function withHString<T>(text: string, fn: (handle: bigint) => T): T {
 /** Read a WinRT `HSTRING` into a JavaScript string without freeing it. */
 export function readHString(handle: bigint | null): string {
   if (!handle || handle === 0n) return "";
-  const len = new c_uint32(0);
-  const ptr = combase().WindowsGetStringRawBuffer(handle, byref(len));
-  const count = Number(len.value);
+  hstringLenOut.value = 0;
+  const ptr = combase().WindowsGetStringRawBuffer(handle, hstringLenOutRef);
+  const count = Number(hstringLenOut.value);
   if (!ptr || count <= 0) return "";
   return wstring_at(BigInt(ptr), count) ?? "";
 }
@@ -340,11 +345,13 @@ export function activateInstance<T extends InterfaceDef<any> = typeof IInspectab
 /** Call `IClosable::Close()` if `pointer` implements `IClosable`. */
 export function tryClose(pointer: COMPointer | null): void {
   if (!pointer || pointer.released) return;
+  const closable = pointer.tryQueryInterface(IClosable);
+  if (!closable) return;
+  using owned = closable;
   try {
-    using closable = pointer.QueryInterface(IClosable);
-    sync(closable).Close();
+    sync(owned).Close();
   } catch {
-    // Not closable or already closed.
+    // Already closed or close failed.
   }
 }
 

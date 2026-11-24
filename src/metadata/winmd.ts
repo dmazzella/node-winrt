@@ -168,6 +168,7 @@ export class WinMdStore {
   readonly files: readonly Ecma335File[];
   readonly #types = new Map<string, WinRTTypeDef>();
   readonly #namespaces = new Map<string, WinRTTypeDef[]>();
+  readonly #namedSignatures = new Map<string, string>();
 
   constructor(paths?: readonly string[]) {
     const resolved = paths && paths.length > 0 ? expandWinMdInputs(paths) : defaultWinMdPaths();
@@ -237,26 +238,36 @@ export class WinMdStore {
         }
       case "named": {
         if (ref.fullName === "System.Guid") return "g16";
+        const cached = this.#namedSignatures.get(ref.fullName);
+        if (cached !== undefined) return cached;
         const def = this.#types.get(ref.fullName);
         if (!def) return `rc(${ref.fullName};cinterface(IInspectable))`;
+        let sig: string;
         switch (def.kind) {
           case "enum":
-            return enumSignature(def.fullName, def.underlying === "Int32");
+            sig = enumSignature(def.fullName, def.underlying === "Int32");
+            break;
           case "struct":
-            return structSignature(
+            sig = structSignature(
               def.fullName,
               def.fields.map((f) => this.typeSignature(f.type)),
             );
+            break;
           case "interface":
             if (!def.guid) throw new Error(`Interface ${def.fullName} has no GuidAttribute`);
-            return def.guid.toLowerCase();
+            sig = def.guid.toLowerCase();
+            break;
           case "delegate":
             if (!def.guid) throw new Error(`Delegate ${def.fullName} has no GuidAttribute`);
-            return delegateSignature(def.guid);
+            sig = delegateSignature(def.guid);
+            break;
           case "class":
             if (!def.defaultInterface) throw new Error(`Runtime class ${def.fullName} has no default interface`);
-            return runtimeClassSignature(def.fullName, this.typeSignature(def.defaultInterface));
+            sig = runtimeClassSignature(def.fullName, this.typeSignature(def.defaultInterface));
+            break;
         }
+        this.#namedSignatures.set(ref.fullName, sig);
+        return sig;
       }
       case "genericInst": {
         const def = this.#types.get(ref.fullName);

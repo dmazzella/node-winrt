@@ -21,6 +21,7 @@ import {
 } from "./native.ts";
 
 const completedHandlerInterfaces = new Map<string, InterfaceDef<any>>();
+const completedHandlerClasses = new WeakMap<InterfaceDef<any>, new (onDone: (status: number) => void) => COMObject>();
 
 function getCompletedHandlerInterface(iid: string): InterfaceDef<any> {
   const key = iid.toUpperCase();
@@ -37,14 +38,39 @@ function getCompletedHandlerInterface(iid: string): InterfaceDef<any> {
   return iface;
 }
 
-/**
- * Await a WinRT `IAsyncAction` using `IAsyncActionCompletedHandler` (zero polling).
- * Takes ownership of `actionAddr` and closes/releases it when settled.
- */
-export async function awaitWinRTAction(actionAddr: bigint, timeoutMs = 30000): Promise<void> {
-  if (!actionAddr) throw new Error("WinRT IAsyncAction pointer is NULL");
-  const action = COMPointer.fromAddress(actionAddr, IAsyncAction);
-  const info = action.QueryInterface(IAsyncInfo);
+function getCompletedHandlerClass(handlerIface: InterfaceDef<any>): new (onDone: (status: number) => void) => COMObject {
+  let Cls = completedHandlerClasses.get(handlerIface);
+  if (!Cls) {
+    Cls = class CompletedDelegate extends COMObject {
+      static _com_interfaces_ = [handlerIface, IAgileObject];
+      static _threading_ = "free" as const;
+      readonly #onDone: (status: number) => void;
+
+      constructor(onDone: (status: number) => void) {
+        super();
+        this.#onDone = onDone;
+      }
+
+      onCompleted(_asyncInfo: unknown, asyncStatus: number): number {
+        this.#onDone(asyncStatus);
+        return S_OK;
+      }
+    };
+    completedHandlerClasses.set(handlerIface, Cls);
+  }
+  return Cls;
+}
+
+export interface AwaitAsyncOptions {
+  /** PIID of `IAsyncOperationCompletedHandler<T>` for zero-polling event completion. */
+  readonly completedHandlerIid?: string;
+  readonly timeoutMs?: number;
+}
+
+async function awaitAsyncCore<I extends InterfaceDef<any>, T>(addr: bigint, iface: I, label: string, readResult: (op: InterfacePointer<I>) => T, handlerIface: InterfaceDef<any> | null, timeoutMs: number): Promise<T> {
+  if (!addr) throw new Error(`WinRT ${label} pointer is NULL`);
+  const op = COMPointer.fromAddress(addr, iface);
+  const info = op.QueryInterface(IAsyncInfo);
 
   const finalize = () => {
     try {
@@ -53,35 +79,34 @@ export async function awaitWinRTAction(actionAddr: bigint, timeoutMs = 30000): P
       // Best-effort close.
     }
     if (!info.released) info.Release();
-    if (!action.released) action.Release();
+    if (!op.released) op.Release();
   };
 
   try {
     const statusBox = new c_int32(0);
-    sync(info).get_Status(byref(statusBox));
+    const statusRef = byref(statusBox);
+    sync(info).get_Status(statusRef);
     let status = Number(statusBox.value);
 
     if (status === AsyncStatus.Started) {
-      status = await new Promise<number>((resolve, reject) => {
-        let settled = false;
-        let handlerPtr: InterfacePointer<typeof IAsyncActionCompletedHandler> | null = null;
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          try {
-            sync(info).Cancel();
-          } catch {
-            // Ignore cancel failure.
-          }
-          handlerPtr?.Release();
-          reject(new Error(`WinRT IAsyncAction timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+      if (handlerIface) {
+        const HandlerClass = getCompletedHandlerClass(handlerIface);
+        status = await new Promise<number>((resolve, reject) => {
+          let settled = false;
+          let handlerPtr: InterfacePointer<any> | null = null;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              sync(info).Cancel();
+            } catch {
+              // Ignore cancel failure.
+            }
+            handlerPtr?.Release();
+            reject(new Error(`WinRT ${label} timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
 
-        class ActionCompletedDelegate extends COMObject {
-          static _com_interfaces_ = [IAsyncActionCompletedHandler, IAgileObject];
-          static _threading_ = "free" as const;
-
-          onCompleted(_asyncInfo: unknown, asyncStatus: number): number {
+          const delegate = new HandlerClass((asyncStatus) => {
             if (!settled) {
               settled = true;
               clearTimeout(timer);
@@ -90,42 +115,66 @@ export async function awaitWinRTAction(actionAddr: bigint, timeoutMs = 30000): P
                 resolve(asyncStatus);
               });
             }
-            return S_OK;
+          });
+          handlerPtr = delegate.QueryInterface(handlerIface);
+          try {
+            (sync(op) as unknown as { put_Completed(ptr: bigint): void }).put_Completed(handlerPtr.address);
+          } catch (error) {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              handlerPtr.Release();
+              reject(error);
+            }
           }
-        }
-
-        const delegate = new ActionCompletedDelegate();
-        handlerPtr = delegate.QueryInterface(IAsyncActionCompletedHandler);
-        try {
-          sync(action).put_Completed(handlerPtr.address);
-        } catch (error) {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            handlerPtr.Release();
-            reject(error);
+        });
+      } else {
+        const deadline = Date.now() + timeoutMs;
+        while (status === AsyncStatus.Started) {
+          if (Date.now() >= deadline) {
+            try {
+              sync(info).Cancel();
+            } catch {
+              // Ignore cancel failure.
+            }
+            throw new Error(`WinRT ${label} timed out after ${timeoutMs}ms`);
           }
+          await sleep(5);
+          sync(info).get_Status(statusRef);
+          status = Number(statusBox.value);
         }
-      });
+      }
     }
 
-    if (status === AsyncStatus.Canceled) throw new Error("WinRT IAsyncAction was canceled");
+    if (status === AsyncStatus.Canceled) throw new Error(`WinRT ${label} was canceled`);
     if (status === AsyncStatus.Error) {
       const errBox = new c_int32(0);
       sync(info).get_ErrorCode(byref(errBox));
-      checkHRESULT(Number(errBox.value), "WinRT IAsyncAction");
-      throw new Error("WinRT IAsyncAction failed");
+      checkHRESULT(Number(errBox.value), `WinRT ${label}`);
+      throw new Error(`WinRT ${label} failed`);
     }
-    sync(action).GetResults();
+
+    return readResult(op);
   } finally {
     finalize();
   }
 }
 
-export interface AwaitAsyncOptions {
-  /** PIID of `IAsyncOperationCompletedHandler<T>` for zero-polling event completion. */
-  readonly completedHandlerIid?: string;
-  readonly timeoutMs?: number;
+/**
+ * Await a WinRT `IAsyncAction` using `IAsyncActionCompletedHandler` (zero polling).
+ * Takes ownership of `actionAddr` and closes/releases it when settled.
+ */
+export function awaitWinRTAction(actionAddr: bigint, timeoutMs = 30000): Promise<void> {
+  return awaitAsyncCore(
+    actionAddr,
+    IAsyncAction,
+    "IAsyncAction",
+    (action) => {
+      sync(action).GetResults();
+    },
+    IAsyncActionCompletedHandler,
+    timeoutMs,
+  );
 }
 
 /**
@@ -138,314 +187,32 @@ export interface AwaitAsyncOptions {
  *
  * Takes ownership of `opAddr` and closes/releases it after reading results.
  */
-export async function awaitWinRTAsync<T>(opAddr: bigint, readResult: (op: InterfacePointer<typeof IAsyncOperationRaw>) => T, options: AwaitAsyncOptions = {}): Promise<T> {
-  if (!opAddr) throw new Error("WinRT IAsyncOperation pointer is NULL");
-  const timeoutMs = options.timeoutMs ?? 30000;
-  const op = COMPointer.fromAddress(opAddr, IAsyncOperationRaw);
-  const info = op.QueryInterface(IAsyncInfo);
-
-  const finalize = () => {
-    try {
-      sync(info).Close();
-    } catch {
-      // Best-effort close.
-    }
-    if (!info.released) info.Release();
-    if (!op.released) op.Release();
-  };
-
-  try {
-    const statusBox = new c_int32(0);
-    sync(info).get_Status(byref(statusBox));
-    let status = Number(statusBox.value);
-
-    if (status === AsyncStatus.Started) {
-      if (options.completedHandlerIid) {
-        const handlerIface = getCompletedHandlerInterface(options.completedHandlerIid);
-        status = await new Promise<number>((resolve, reject) => {
-          let settled = false;
-          let handlerPtr: InterfacePointer<any> | null = null;
-          const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            handlerPtr?.Release();
-            reject(new Error(`WinRT IAsyncOperation timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-
-          class OpCompletedDelegate extends COMObject {
-            static _com_interfaces_ = [handlerIface, IAgileObject];
-            static _threading_ = "free" as const;
-
-            onCompleted(_asyncInfo: unknown, asyncStatus: number): number {
-              if (!settled) {
-                settled = true;
-                clearTimeout(timer);
-                setImmediate(() => {
-                  handlerPtr?.Release();
-                  resolve(asyncStatus);
-                });
-              }
-              return S_OK;
-            }
-          }
-
-          const delegate = new OpCompletedDelegate();
-          handlerPtr = delegate.QueryInterface(handlerIface);
-          try {
-            sync(op).put_Completed(handlerPtr.address);
-          } catch (error) {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timer);
-              handlerPtr.Release();
-              reject(error);
-            }
-          }
-        });
-      } else {
-        const deadline = Date.now() + timeoutMs;
-        while (status === AsyncStatus.Started) {
-          if (Date.now() >= deadline) {
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            throw new Error(`WinRT IAsyncOperation timed out after ${timeoutMs}ms`);
-          }
-          await sleep(5);
-          sync(info).get_Status(byref(statusBox));
-          status = Number(statusBox.value);
-        }
-      }
-    }
-
-    if (status === AsyncStatus.Canceled) throw new Error("WinRT IAsyncOperation was canceled");
-    if (status === AsyncStatus.Error) {
-      const errBox = new c_int32(0);
-      sync(info).get_ErrorCode(byref(errBox));
-      checkHRESULT(Number(errBox.value), "WinRT IAsyncOperation");
-      throw new Error("WinRT IAsyncOperation failed");
-    }
-
-    return readResult(op);
-  } finally {
-    finalize();
-  }
+export function awaitWinRTAsync<T>(opAddr: bigint, readResult: (op: InterfacePointer<typeof IAsyncOperationRaw>) => T, options: AwaitAsyncOptions = {}): Promise<T> {
+  return awaitAsyncCore(opAddr, IAsyncOperationRaw, "IAsyncOperation", readResult, options.completedHandlerIid ? getCompletedHandlerInterface(options.completedHandlerIid) : null, options.timeoutMs ?? 30000);
 }
 
 /**
  * Await a WinRT `IAsyncOperationWithProgress<TResult, TProgress>` (slots 8/10 for
  * `put_Completed` / `GetResults`), taking ownership of `opAddr`.
  */
-export async function awaitWinRTAsyncWithProgress<T>(opAddr: bigint, readResult: (op: InterfacePointer<typeof IAsyncOperationWithProgressRaw>) => T, options: AwaitAsyncOptions = {}): Promise<T> {
-  if (!opAddr) throw new Error("WinRT IAsyncOperationWithProgress pointer is NULL");
-  const timeoutMs = options.timeoutMs ?? 30000;
-  const op = COMPointer.fromAddress(opAddr, IAsyncOperationWithProgressRaw);
-  const info = op.QueryInterface(IAsyncInfo);
-
-  const finalize = () => {
-    try {
-      sync(info).Close();
-    } catch {
-      // Best-effort close.
-    }
-    if (!info.released) info.Release();
-    if (!op.released) op.Release();
-  };
-
-  try {
-    const statusBox = new c_int32(0);
-    sync(info).get_Status(byref(statusBox));
-    let status = Number(statusBox.value);
-
-    if (status === AsyncStatus.Started) {
-      if (options.completedHandlerIid) {
-        const handlerIface = getCompletedHandlerInterface(options.completedHandlerIid);
-        status = await new Promise<number>((resolve, reject) => {
-          let settled = false;
-          let handlerPtr: InterfacePointer<any> | null = null;
-          const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            handlerPtr?.Release();
-            reject(new Error(`WinRT IAsyncOperationWithProgress timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-
-          class OpProgressCompletedDelegate extends COMObject {
-            static _com_interfaces_ = [handlerIface, IAgileObject];
-            static _threading_ = "free" as const;
-
-            onCompleted(_asyncInfo: unknown, asyncStatus: number): number {
-              if (!settled) {
-                settled = true;
-                clearTimeout(timer);
-                setImmediate(() => {
-                  handlerPtr?.Release();
-                  resolve(asyncStatus);
-                });
-              }
-              return S_OK;
-            }
-          }
-
-          const delegate = new OpProgressCompletedDelegate();
-          handlerPtr = delegate.QueryInterface(handlerIface);
-          try {
-            sync(op).put_Completed(handlerPtr.address);
-          } catch (error) {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timer);
-              handlerPtr.Release();
-              reject(error);
-            }
-          }
-        });
-      } else {
-        const deadline = Date.now() + timeoutMs;
-        while (status === AsyncStatus.Started) {
-          if (Date.now() >= deadline) {
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            throw new Error(`WinRT IAsyncOperationWithProgress timed out after ${timeoutMs}ms`);
-          }
-          await sleep(5);
-          sync(info).get_Status(byref(statusBox));
-          status = Number(statusBox.value);
-        }
-      }
-    }
-
-    if (status === AsyncStatus.Canceled) throw new Error("WinRT IAsyncOperationWithProgress was canceled");
-    if (status === AsyncStatus.Error) {
-      const errBox = new c_int32(0);
-      sync(info).get_ErrorCode(byref(errBox));
-      checkHRESULT(Number(errBox.value), "WinRT IAsyncOperationWithProgress");
-      throw new Error("WinRT IAsyncOperationWithProgress failed");
-    }
-
-    return readResult(op);
-  } finally {
-    finalize();
-  }
+export function awaitWinRTAsyncWithProgress<T>(opAddr: bigint, readResult: (op: InterfacePointer<typeof IAsyncOperationWithProgressRaw>) => T, options: AwaitAsyncOptions = {}): Promise<T> {
+  return awaitAsyncCore(opAddr, IAsyncOperationWithProgressRaw, "IAsyncOperationWithProgress", readResult, options.completedHandlerIid ? getCompletedHandlerInterface(options.completedHandlerIid) : null, options.timeoutMs ?? 30000);
 }
 
 /**
  * Await a WinRT `IAsyncActionWithProgress<TProgress>`, taking ownership of `actionAddr`.
  */
-export async function awaitWinRTActionWithProgress(actionAddr: bigint, options: AwaitAsyncOptions = {}): Promise<void> {
-  if (!actionAddr) throw new Error("WinRT IAsyncActionWithProgress pointer is NULL");
-  const timeoutMs = options.timeoutMs ?? 30000;
-  const action = COMPointer.fromAddress(actionAddr, IAsyncActionWithProgressRaw);
-  const info = action.QueryInterface(IAsyncInfo);
-
-  const finalize = () => {
-    try {
-      sync(info).Close();
-    } catch {
-      // Best-effort close.
-    }
-    if (!info.released) info.Release();
-    if (!action.released) action.Release();
-  };
-
-  try {
-    const statusBox = new c_int32(0);
-    sync(info).get_Status(byref(statusBox));
-    let status = Number(statusBox.value);
-
-    if (status === AsyncStatus.Started) {
-      if (options.completedHandlerIid) {
-        const handlerIface = getCompletedHandlerInterface(options.completedHandlerIid);
-        status = await new Promise<number>((resolve, reject) => {
-          let settled = false;
-          let handlerPtr: InterfacePointer<any> | null = null;
-          const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            handlerPtr?.Release();
-            reject(new Error(`WinRT IAsyncActionWithProgress timed out after ${timeoutMs}ms`));
-          }, timeoutMs);
-
-          class ActionProgressCompletedDelegate extends COMObject {
-            static _com_interfaces_ = [handlerIface, IAgileObject];
-            static _threading_ = "free" as const;
-
-            onCompleted(_asyncInfo: unknown, asyncStatus: number): number {
-              if (!settled) {
-                settled = true;
-                clearTimeout(timer);
-                setImmediate(() => {
-                  handlerPtr?.Release();
-                  resolve(asyncStatus);
-                });
-              }
-              return S_OK;
-            }
-          }
-
-          const delegate = new ActionProgressCompletedDelegate();
-          handlerPtr = delegate.QueryInterface(handlerIface);
-          try {
-            sync(action).put_Completed(handlerPtr.address);
-          } catch (error) {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timer);
-              handlerPtr.Release();
-              reject(error);
-            }
-          }
-        });
-      } else {
-        const deadline = Date.now() + timeoutMs;
-        while (status === AsyncStatus.Started) {
-          if (Date.now() >= deadline) {
-            try {
-              sync(info).Cancel();
-            } catch {
-              // Ignore cancel failure.
-            }
-            throw new Error(`WinRT IAsyncActionWithProgress timed out after ${timeoutMs}ms`);
-          }
-          await sleep(5);
-          sync(info).get_Status(byref(statusBox));
-          status = Number(statusBox.value);
-        }
-      }
-    }
-
-    if (status === AsyncStatus.Canceled) throw new Error("WinRT IAsyncActionWithProgress was canceled");
-    if (status === AsyncStatus.Error) {
-      const errBox = new c_int32(0);
-      sync(info).get_ErrorCode(byref(errBox));
-      checkHRESULT(Number(errBox.value), "WinRT IAsyncActionWithProgress");
-      throw new Error("WinRT IAsyncActionWithProgress failed");
-    }
-
-    sync(action).GetResults();
-  } finally {
-    finalize();
-  }
+export function awaitWinRTActionWithProgress(actionAddr: bigint, options: AwaitAsyncOptions = {}): Promise<void> {
+  return awaitAsyncCore(
+    actionAddr,
+    IAsyncActionWithProgressRaw,
+    "IAsyncActionWithProgress",
+    (action) => {
+      sync(action).GetResults();
+    },
+    options.completedHandlerIid ? getCompletedHandlerInterface(options.completedHandlerIid) : null,
+    options.timeoutMs ?? 30000,
+  );
 }
 
 /**
@@ -468,9 +235,9 @@ export function readVectorView<T>(viewAddr: bigint, readElement: (view: Interfac
   const sizeBox = new c_uint32(0);
   sync(view).get_Size(byref(sizeBox));
   const count = Number(sizeBox.value);
-  const items: T[] = [];
+  const items = new Array<T>(count);
   for (let index = 0; index < count; index++) {
-    items.push(readElement(view, index));
+    items[index] = readElement(view, index);
   }
   return items;
 }
@@ -553,8 +320,8 @@ export class WinRTVector<T, TIn = T> implements Disposable, Iterable<T> {
   toArray(): T[] {
     const count = this.size;
     const view = this.raw as unknown as InterfacePointer<typeof IVectorViewRaw>;
-    const items: T[] = [];
-    for (let i = 0; i < count; i++) items.push(this.#readElement(view, i));
+    const items = new Array<T>(count);
+    for (let i = 0; i < count; i++) items[i] = this.#readElement(view, i);
     return items;
   }
 
@@ -629,10 +396,12 @@ export function readIterable<T>(iterableAddr: bigint, readCurrent: (iter: Interf
 
   const items: T[] = [];
   const hasBox = new c_uint8(0);
-  sync(iter).get_HasCurrent(byref(hasBox));
+  const hasRef = byref(hasBox);
+  const syncIter = sync(iter);
+  syncIter.get_HasCurrent(hasRef);
   while (hasBox.value !== 0) {
     items.push(readCurrent(iter));
-    sync(iter).MoveNext(byref(hasBox));
+    syncIter.MoveNext(hasRef);
   }
   return items;
 }
@@ -673,17 +442,20 @@ export function readMapView<K, V>(mapAddr: bigint, iterablePiid: string, readKey
   using iter = COMPointer.fromAddress(iterAddr, IIteratorRaw);
 
   const hasBox = new c_uint8(0);
+  const hasRef = byref(hasBox);
   const pairOut = new c_void_p(0n);
-  sync(iter).get_HasCurrent(byref(hasBox));
+  const pairRef = byref(pairOut);
+  const syncIter = sync(iter);
+  syncIter.get_HasCurrent(hasRef);
   while (hasBox.value !== 0) {
     pairOut.value = 0n;
-    sync(iter).get_Current(byref(pairOut));
+    syncIter.get_Current(pairRef);
     const pairAddr = BigInt(pairOut.value ?? 0n);
     if (pairAddr) {
       using pair = COMPointer.fromAddress(pairAddr, IKeyValuePairRaw);
       result.set(readKey(pair), readValue(pair));
     }
-    sync(iter).MoveNext(byref(hasBox));
+    syncIter.MoveNext(hasRef);
   }
   return result;
 }
@@ -707,6 +479,7 @@ export function takeCoTaskMemBytes(dataPtr: bigint, length: number): Buffer {
 }
 
 const eventHandlerInterfaces = new Map<string, InterfaceDef<any>>();
+const typedEventHandlerClasses = new WeakMap<InterfaceDef<any>, new (cb: (senderAddr: bigint, argsAddr: bigint) => void) => COMObject>();
 
 /**
  * Create a free-threaded WinRT `TypedEventHandler<TSender, TArgs>` COM delegate
@@ -725,30 +498,40 @@ export function createTypedEventHandler(piid: string, callback: (senderAddr: big
     });
     eventHandlerInterfaces.set(key, iface);
   }
-  const eventIface = iface;
+  let Delegate = typedEventHandlerClasses.get(iface);
+  if (!Delegate) {
+    const eventIface = iface;
+    Delegate = class TypedEventDelegate extends COMObject {
+      static _com_interfaces_ = [eventIface, IAgileObject];
+      static _threading_ = "free" as const;
+      readonly #callback: (senderAddr: bigint, argsAddr: bigint) => void;
 
-  class Delegate extends COMObject {
-    static _com_interfaces_ = [eventIface, IAgileObject];
-    static _threading_ = "free" as const;
-
-    onEvent(sender: bigint | null, args: bigint | null): number {
-      const s = sender ? BigInt(sender) : 0n;
-      const a = args ? BigInt(args) : 0n;
-      try {
-        callback(s, a);
-      } catch (err) {
-        queueMicrotask(() => {
-          throw err;
-        });
+      constructor(cb: (senderAddr: bigint, argsAddr: bigint) => void) {
+        super();
+        this.#callback = cb;
       }
-      return S_OK;
-    }
+
+      onEvent(sender: bigint | null, args: bigint | null): number {
+        const s = sender ? BigInt(sender) : 0n;
+        const a = args ? BigInt(args) : 0n;
+        try {
+          this.#callback(s, a);
+        } catch (err) {
+          queueMicrotask(() => {
+            throw err;
+          });
+        }
+        return S_OK;
+      }
+    };
+    typedEventHandlerClasses.set(iface, Delegate);
   }
 
-  return new Delegate().QueryInterface(eventIface);
+  return new Delegate(callback).QueryInterface(iface);
 }
 
 const singleArgHandlerInterfaces = new Map<string, InterfaceDef<any>>();
+const singleArgHandlerClasses = new WeakMap<InterfaceDef<any>, new (cb: (...args: bigint[]) => void) => COMObject>();
 
 /**
  * Create a free-threaded WinRT `EventHandler<T>` or single-argument custom delegate
@@ -771,24 +554,34 @@ export function createDelegateHandler(iid: string, paramCount: 0 | 1 | 2, callba
     });
     singleArgHandlerInterfaces.set(key, iface);
   }
-  const delegateIface = iface;
+  let Delegate = singleArgHandlerClasses.get(iface);
+  if (!Delegate) {
+    const delegateIface = iface;
+    const hasArg = paramCount === 1;
+    Delegate = class SingleArgDelegate extends COMObject {
+      static _com_interfaces_ = [delegateIface, IAgileObject];
+      static _threading_ = "free" as const;
+      readonly #callback: (...args: bigint[]) => void;
 
-  class Delegate extends COMObject {
-    static _com_interfaces_ = [delegateIface, IAgileObject];
-    static _threading_ = "free" as const;
-
-    onEvent(a?: bigint | null): number {
-      const args = paramCount === 1 ? [a ? BigInt(a) : 0n] : [];
-      try {
-        callback(...args);
-      } catch (err) {
-        queueMicrotask(() => {
-          throw err;
-        });
+      constructor(cb: (...args: bigint[]) => void) {
+        super();
+        this.#callback = cb;
       }
-      return S_OK;
-    }
+
+      onEvent(a?: bigint | null): number {
+        try {
+          if (hasArg) this.#callback(a ? BigInt(a) : 0n);
+          else this.#callback();
+        } catch (err) {
+          queueMicrotask(() => {
+            throw err;
+          });
+        }
+        return S_OK;
+      }
+    };
+    singleArgHandlerClasses.set(iface, Delegate);
   }
 
-  return new Delegate().QueryInterface(delegateIface);
+  return new Delegate(callback).QueryInterface(iface);
 }
