@@ -1,54 +1,38 @@
-# @node-ctypes/winrt
+# node-winrt (`@node-ctypes/winrt`)
 
-Typed **Windows Runtime (WinRT)** projections and **`.winmd` (ECMA-335) TypeScript code generator** for Node.js, powered by [`@node-ctypes/comtypes`](../node-comtypes/README.md) and [`node-ctypes`](../../README.md) — pure TypeScript, zero C++ compilation, native on Windows x64 and ARM64, and compatible with Electron (`NODE_CTYPES_NO_EXTERNAL_BUFFERS=1`).
+[![npm version](https://img.shields.io/npm/v/@node-ctypes/winrt.svg)](https://www.npmjs.com/package/@node-ctypes/winrt)
+[![npm downloads](https://img.shields.io/npm/dm/@node-ctypes/winrt.svg)](https://www.npmjs.com/package/@node-ctypes/winrt)
+[![CI](https://github.com/dmazzella/node-winrt/actions/workflows/ci.yml/badge.svg)](https://github.com/dmazzella/node-winrt/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Think of it as **`PyWinRT` / `windows-rs` for Node.js**.
+**Typed Windows Runtime (WinRT) projections and `.winmd` (ECMA-335) TypeScript code generator for Node.js**, powered by
+[`@node-ctypes/comtypes`](https://www.npmjs.com/package/@node-ctypes/comtypes) and
+[`node-ctypes`](https://www.npmjs.com/package/node-ctypes).
+Think of it as **`PyWinRT` / `windows-rs` for Node.js** — pure TypeScript, zero C++ compilation.
 
-## Features
+- **Node.js 24+**, ESM, TypeScript declarations.
+- **Zero-dependency `.winmd` reader & codegen**: reads `C:\Windows\System32\WinMetadata\*.winmd` or Windows App SDK `.winmd` files (`--winapp`) with exact WinRT UUIDv5 PIIDs and `--only` tree-shaking.
+- **Event-driven WinRT async, events, collections & WinUI 3**: `IAsyncAction`/`IAsyncOperation<T>` via free-threaded `CompletedHandler`, `on<Event>()`, `WinRTVector`, `bootstrapWindowsAppRuntime()` (zero `Bootstrap.dll`), and COM aggregation (`composeWinRTClass`).
 
-- **Zero-dependency ECMA-335 `.winmd` reader**: parses `C:\Windows\System32\WinMetadata\*.winmd` (present on every Windows 10/11 machine without installing the Windows SDK), the unified `Windows.winmd`, or third-party `.winmd` files (e.g. Windows App SDK / WinUI). Runs cross-platform so you can even generate projections on macOS/Linux CI.
-- **Exact WinRT PIID (UUIDv5) computation**: computes parameterized interface and delegate IIDs (`IAsyncOperation<T>`, `IAsyncOperationCompletedHandler<T>`, `IVectorView<T>`, `TypedEventHandler<TSender, TArgs>`, …) per Microsoft's WinRT specification.
-- **Event-driven WinRT async (`Promise<T>`)**: methods returning `IAsyncAction`, `IAsyncOperation<T>`, `IAsyncOperationWithProgress<T, P>`, or `IAsyncActionWithProgress<P>` attach a free-threaded `CompletedHandler` (`COMObject` + `IAgileObject`) — zero polling, no event-loop blocking.
-- **Full WinRT type projections**:
-  - Enums (frozen objects + union types) and Structs (`node-ctypes` `Structure` subclasses)
-  - `IReference<T>` → `T | null`
-  - `IVectorView<T>` / `IVector<T>` / `IIterable<T>` → `T[]` and `IMapView<K, V>` / `IMap<K, V>` → `Map<K, V>`
-  - WinRT byte arrays (`PassArray`, `FillArray`, and `ReceiveArray` with `CoTaskMemFree`)
-  - Events (`TypedEventHandler<S, A>`, `EventHandler<T>`, and custom delegates) via `on<Event>()`
-  - Runtime class inheritance (`baseClass` interfaces), polymorphic COM argument `QueryInterface`, composable factories (`[Composable(IFactory, Public)]` -> `.create()`), and `Disposable` (`using`) via `IClosable` + `Release`.
-- **Windows App SDK, WinUI 3 & Registration-Free WinRT**:
-  - `bootstrapWindowsAppRuntime()` uses Windows 11's built-in `kernelbase.dll` Dynamic Dependencies API (`TryCreatePackageDependency` + `AddPackageDependency`) — zero external `Bootstrap.dll` required — to attach the installed `Microsoft.WindowsAppRuntime.*` framework package, discover its `.winmd` directory (`packagePath`), and run WinUI 3 (`Microsoft.UI.Xaml.*`, `AppWindow`, `DesktopWindowXamlSource`, `XamlReader`, `RenderTargetBitmap`, `Microsoft.Windows.AI.*`) directly from Node.js (with `pumpWin32Messages()` for STA threads).
-  - `initializeWindowsAppSdk` / `windowsAppSdk({ majorMinorVersion: "1.6" })` (`MddBootstrapInitialize2` / `MddBootstrapShutdown`) for Windows 10 or explicit `Microsoft.WindowsAppRuntime.Bootstrap.dll` loading.
-  - `registerActivationDll(classNameOrPrefix, dllPath)` / `getActivationFactoryFromDll(...)` to activate unregistered WinRT DLLs directly through `DllGetActivationFactory`.
+---
 
-## CLI
+## Quick start
 
 ```sh
-# List available WinRT namespaces on this Windows machine
-npx node-winrt namespaces --filter Media
-
-# Inspect all types, interfaces and IIDs in a namespace
-npx node-winrt info Windows.Media.Ocr
-
-# Generate strictly-typed TypeScript projections
-npx node-winrt generate Windows.Media.Ocr Windows.Globalization Windows.Graphics.Imaging Windows.Storage.Streams --out src/winrt
-
-# Or emit compiled .js + .d.ts directly (requires typescript)
-npx node-winrt generate Windows.Media.Ocr Windows.Globalization --out src/winrt --js
+npm install @node-ctypes/winrt
+npx node-winrt generate Windows.Media.Ocr Windows.Globalization Windows.Security.Credentials.UI --out src/winrt
 ```
 
-## Example (generated WinRT classes)
-
-```ts
+```typescript
 import { Language } from "./winrt/Windows.Globalization.ts";
 import { OcrEngine } from "./winrt/Windows.Media.Ocr.ts";
 import { UserConsentVerifier } from "./winrt/Windows.Security.Credentials.UI.ts";
 
-// Windows Hello availability (event-driven IAsyncOperation -> Promise)
+// Event-driven WinRT async -> Promise
 const availability = await UserConsentVerifier.checkAvailabilityAsync();
 console.log("Windows Hello availability:", availability);
 
-// WinRT Globalization + OCR
+// Disposable WinRT classes (`IClosable::Close()` + `Release()`)
 using lang = Language.createLanguage("en-US");
 console.log(lang?.languageTag, lang?.displayName);
 
@@ -56,22 +40,41 @@ using engine = OcrEngine.tryCreateFromUserProfileLanguages();
 console.log("OCR max dimension:", OcrEngine.maxImageDimension);
 ```
 
-## Scripts
+To build from source, see [Getting started](guides/getting-started.md#building-from-source).
 
-```sh
-npm run build       # compile TypeScript to dist/
-npm run typecheck   # strict type checking (src + tests + examples)
-npm test            # build, typecheck, unit tests (ECMA-335/PIID) + live Windows WinRT + WinUI 3 tests
-```
+## Supported platforms
+
+| Operating system | x64 | ARM64 | Notes                                                                             |
+| ---------------- | --- | ----- | --------------------------------------------------------------------------------- |
+| Windows 10 / 11  | ✅  | ✅    | Full WinRT runtime, WinUI 3 (`bootstrapWindowsAppRuntime`) and `.winmd` codegen   |
+| macOS / Linux    | ✅  | ✅    | `.winmd` parser, PIID calculator and TypeScript code generator run cross-platform |
+
+Node.js 24 or later. Verified in Electron / mirror mode (`NODE_CTYPES_NO_EXTERNAL_BUFFERS=1`).
+
+---
+
+## Guides
+
+- [Getting started](guides/getting-started.md) — installation, requirements, CLI quick start and entry points
+- [Code generation and WinMD metadata](guides/codegen-and-winmd.md) — ECMA-335 `.winmd` reader, PIID computation, tree-shaking (`--only`), `--winapp`, `--js` emit and type mappings
+- [Async, events and collections](guides/async-events-and-collections.md) — event-driven WinRT `Promise`s, `on<Event>()` delegates, `WinRTVector`, `IVectorView`, `IMapView`, `IReference` and byte arrays
+- [WinUI 3 and Windows App SDK](guides/winui3-and-app-sdk.md) — `bootstrapWindowsAppRuntime()` (zero `Bootstrap.dll`), DPI awareness, Win32 message loop, COM aggregation (`composeWinRTClass`) and registration-free DLLs
+- [Building, testing and internals](guides/contributing.md) — scripts, mirror-mode testing, demo regeneration, CI and release workflow
+
+---
 
 ## Examples
 
-Generate projections for all examples in one command (`npm run demo:gen:all`), then run any example directly with Node.js:
+Generate projections for all examples (`npm run demo:gen:all`), then run any example directly; see the [index](examples/README.md).
 
-| Example                                                                                                             | Generate                  | Run                                            |
-| ------------------------------------------------------------------------------------------------------------------- | ------------------------- | ---------------------------------------------- |
-| **WinUI 3 Controls Gallery** (`Application` + `Window` + `MicaBackdrop` + `NavigationView` + 30 Fluent v2 controls) | `npm run demo:winui3:gen` | `npm run demo:winui3`                          |
-| **Windows Hello** (`UserConsentVerifier` biometrics / PIN)                                                          | `npm run demo:hello:gen`  | `npm run demo:hello` (or `-- --verify`)        |
-| **Native Windows OCR on PNG/JPG** (`StorageFile` + `BitmapDecoder` + `OcrEngine`)                                   | `npm run demo:ocr:gen`    | `node examples/ocr-image/index.ts <image.png>` |
-| **Windows Toast Notifications** (`ToastNotificationManager` + `XmlDocument`)                                        | `npm run demo:toast:gen`  | `npm run demo:toast`                           |
-| **Bluetooth LE Scanner** (`BluetoothLEAdvertisementWatcher` live events)                                            | `npm run demo:ble:gen`    | `npm run demo:ble`                             |
+- [WinUI 3 Controls Gallery](examples/winui3-gallery/index.ts) — native `Application` + `Window` + `MicaBackdrop` + `NavigationView` + 30 Fluent v2 controls
+- [Windows Hello](examples/windows-hello/index.ts) — `UserConsentVerifier` biometric / PIN prompt
+- [OCR Image](examples/ocr-image/index.ts) — `StorageFile` + `BitmapDecoder` + `OcrEngine` on PNG/JPG images
+- [Toast Notification](examples/toast-notification/index.ts) — `ToastNotificationManager` + `XmlDocument`
+- [Bluetooth LE Scanner](examples/bluetooth-scan/index.ts) — `BluetoothLEAdvertisementWatcher` live WinRT events
+
+---
+
+## License
+
+[MIT](LICENSE). See [NOTICE](NOTICE) for third-party specification references.
