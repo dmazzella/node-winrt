@@ -1,0 +1,87 @@
+{
+  "name": "@node-ctypes/winrt",
+  "version": "0.1.0",
+  "description": "Typed Windows Runtime (WinRT) projections and .winmd TypeScript code generator for Node.js powered by @node-ctypes/comtypes and node-ctypes",
+  "author": "Damiano Mazzella",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmazzella/node-winrt.git"
+  },
+  "homepage": "https://github.com/dmazzella/node-winrt#readme",
+  "bugs": {
+    "url": "https://github.com/dmazzella/node-winrt/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "node-winrt": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./metadata": {
+      "types": "./dist/metadata/index.d.ts",
+      "import": "./dist/metadata/index.js"
+    },
+    "./codegen": {
+      "types": "./dist/codegen/generate.d.ts",
+      "import": "./dist/codegen/generate.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "keywords": [
+    "winrt",
+    "winmd",
+    "windows",
+    "com",
+    "comtypes",
+    "ffi",
+    "ocr",
+    "projection",
+    "codegen",
+    "node-ctypes"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.ts",
+    "typecheck": "tsc -p tsconfig.json && npm run test:types",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "test:types": "tsc -p tests/tsconfig.json && tsc -p tests/types/tsconfig.json",
+    "test": "npm run build && npm run test:types && node --test --test-concurrency=1 \"tests/checks/*.test.ts\" \"tests/src/*.test.ts\"",
+    "test:unit": "npm run build && node --test \"tests/checks/*.test.ts\"",
+    "demo:winui3:gen": "node dist/cli.js generate Windows.Foundation Microsoft.UI Microsoft.UI.Windowing Microsoft.UI.Xaml Microsoft.UI.Xaml.Controls Microsoft.UI.Xaml.Controls.Primitives Microsoft.UI.Xaml.Markup Microsoft.UI.Xaml.Media Microsoft.UI.Xaml.XamlTypeInfo --winapp --only Microsoft.UI.Xaml:Application,IApplicationOverrides,ResourceDictionary,Window,UIElement,FrameworkElement,IUIElement,IFrameworkElement --only Microsoft.UI.Xaml.Media:SystemBackdrop,MicaBackdrop,ISystemBackdrop,IMicaBackdrop --only Microsoft.UI.Xaml.Controls:XamlControlsResources,NavigationView,NavigationViewItem,NavigationViewSelectionChangedEventArgs,ScrollViewer,TextBlock,TextBox,PasswordBox,NumberBox,AutoSuggestBox,Button,CheckBox,RadioButton,ToggleSwitch,Slider,ProgressBar,ProgressRing,RatingControl,InfoBar,Expander,ComboBox,ListView,ColorPicker,MenuFlyoutItem,ToggleMenuFlyoutItem,SplitButton --only Microsoft.UI.Xaml.Controls.Primitives:ToggleButton,RepeatButton,IButtonBase,IRangeBase,IToggleButton,IRepeatButton,ISelector --out examples/winui3-gallery/winrt",
+    "demo:winui3": "node examples/winui3-gallery/index.ts",
+    "demo:hello:gen": "node dist/cli.js generate Windows.Security.Credentials.UI --out examples/windows-hello/winrt",
+    "demo:hello": "node examples/windows-hello/index.ts",
+    "demo:ocr:gen": "node dist/cli.js generate Windows.Foundation Windows.Storage Windows.Storage.Streams Windows.Graphics.Imaging Windows.Media.Ocr --only Windows.Storage:StorageFile --only Windows.Storage.Streams:IRandomAccessStream --out examples/ocr-image/winrt",
+    "demo:toast:gen": "node dist/cli.js generate Windows.Foundation Windows.Data.Xml.Dom Windows.UI.Notifications --only Windows.Data.Xml.Dom:XmlDocument --only Windows.UI.Notifications:ToastNotification,ToastNotificationManager,ToastNotifier --out examples/toast-notification/winrt",
+    "demo:toast": "node examples/toast-notification/index.ts",
+    "demo:ble:gen": "node dist/cli.js generate Windows.Foundation Windows.Devices.Bluetooth.Advertisement --out examples/bluetooth-scan/winrt",
+    "demo:ble": "node examples/bluetooth-scan/index.ts",
+    "demo:gen:all": "npm run demo:winui3:gen && npm run demo:hello:gen && npm run demo:ocr:gen && npm run demo:toast:gen && npm run demo:ble:gen",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test"
+  },
+  "dependencies": {
+    "@node-ctypes/comtypes": "^0.3.1",
+    "node-ctypes": "^2.15.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~6.0.3"
+  }
+}

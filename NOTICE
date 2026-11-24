@@ -1,0 +1,7 @@
+This package reads Windows Runtime metadata (.winmd, ECMA-335 CLI format)
+and calls the Windows Runtime (combase.dll) through @node-ctypes/comtypes
+and node-ctypes. It does not distribute any Windows component.
+
+WinRT metadata and ABI conventions follow ECMA-335 and Microsoft's WinRT
+specifications:
+https://learn.microsoft.com/windows/uwp/winrt-components/
