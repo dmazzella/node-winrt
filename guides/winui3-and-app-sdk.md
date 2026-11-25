@@ -75,6 +75,8 @@ Application.start(() => new App());
 
 See [examples/hello-winui3/index.ts](../examples/hello-winui3/index.ts) for this minimal app (direct counterpart to `pywinrt/samples/winui3/hello_app.py`), and [examples/winui3-gallery/index.ts](../examples/winui3-gallery/index.ts) for a full Fluent v2 Controls Gallery with `MicaBackdrop`, `NavigationView` and 30 interactive controls. Lower-level `composeWinRTClass` and `createWinRTAggregate` are also exported for custom scenarios.
 
+> **Using `async`/`await` inside WinUI 3 event handlers:** `Application.start()` runs WinUI 3's synchronous blocking message loop on the main thread, so Node.js's libuv event loop is paused until `Application.exit()`. When you want `onClick(async () => ...)` handlers that `await` timers, `fetch()`, `fs/promises`, or WinRT `*Async()` APIs while keeping the UI responsive, host XAML via `AppWindow` + `DesktopWindowXamlSource` + `startWin32MessageLoop()` — see [examples/async-winui3/index.ts](../examples/async-winui3/index.ts).
+
 ## Registration-free WinRT DLLs
 
 For custom or unregistered C++/WinRT DLLs, register a class name or namespace prefix with `registerActivationDll(classNameOrPrefix, dllPath)` so `getActivationFactory` and `activateInstance` invoke the DLL's exported `DllGetActivationFactory` directly without OS registry entries or an SxS manifest.

@@ -68,6 +68,7 @@ Node.js 24 or later. Verified in Electron / mirror mode (`NODE_CTYPES_NO_EXTERNA
 Generate projections for all examples (`npm run demo:gen:all`), then run any example directly; see the [index](examples/README.md).
 
 - [Hello WinUI 3](examples/hello-winui3/index.ts) — minimal `class App extends Application` + `override onLaunched()` (counterpart to PyWinRT's `hello_app.py`)
+- [Async WinUI 3](examples/async-winui3/index.ts) — Fluent v2 WinUI 3 with full `async/await` event handlers (`node:timers/promises`, `fetch()`, WinRT `*Async()`) via `DesktopWindowXamlSource` + `startWin32MessageLoop()`
 - [WinUI 3 Controls Gallery](examples/winui3-gallery/index.ts) — native `Application` + `Window` + `MicaBackdrop` + `NavigationView` + 30 Fluent v2 controls
 - [Windows Hello](examples/windows-hello/index.ts) — `UserConsentVerifier` biometric / PIN prompt
 - [OCR Image](examples/ocr-image/index.ts) — `StorageFile` + `BitmapDecoder` + `OcrEngine` on PNG/JPG images
