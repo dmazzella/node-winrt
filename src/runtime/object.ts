@@ -59,16 +59,24 @@ export class WinRTObject implements Disposable {
     return getRuntimeClassName(this.raw);
   }
 
-  /** Close (`IClosable::Close` when supported), release the COM reference, and dispose any attached COM aggregate. */
+  /** Close (`IClosable::Close` when supported), release the COM reference, and dispose any attached COM aggregate when no external COM refs remain. */
   dispose(): void {
-    if (!this.raw.released) {
-      tryClose(this.raw);
-      this.raw.Release();
-    }
-    if (this.#aggregate) {
-      const agg = this.#aggregate;
-      this.#aggregate = null;
-      agg[Symbol.dispose]();
+    const agg = this.#aggregate as (Disposable & { beginWrapperDispose?: () => void; endWrapperDispose?: () => void }) | null;
+    this.#aggregate = null;
+    agg?.beginWrapperDispose?.();
+    try {
+      if (!this.raw.released) {
+        tryClose(this.raw);
+        this.raw.Release();
+      }
+    } finally {
+      if (agg) {
+        if (agg.endWrapperDispose) {
+          agg.endWrapperDispose();
+        } else {
+          agg[Symbol.dispose]();
+        }
+      }
     }
   }
 

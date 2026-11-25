@@ -24,7 +24,7 @@ const XAML = `
 `;
 
 class App extends Application {
-  readonly #owned: Disposable[] = [];
+  window?: Window;
 
   constructor() {
     using provider = new XamlControlsXamlMetaDataProvider();
@@ -37,38 +37,21 @@ class App extends Application {
     using merged = appRes.mergedDictionaries!;
     merged.append(resources);
 
-    const window = XamlReader.load(XAML)!.as(Window);
-    this.#owned.push(window);
+    this.window = XamlReader.load(XAML)!.as(Window);
 
-    using content = window.content!.as(FrameworkElement);
-    const clickBtn = content.findName("click")!.as(Button);
-    const exitBtn = content.findName("exit")!.as(Button);
-    this.#owned.push(
-      clickBtn,
-      exitBtn,
-      clickBtn.onClick(() => console.log("Hello, world!")),
-      exitBtn.onClick(() => this.exit()),
-    );
+    using content = this.window.content!.as(FrameworkElement);
+    using clickBtn = content.findName("click")!.as(Button);
+    using exitBtn = content.findName("exit")!.as(Button);
+    clickBtn.onClick(() => console.log("Hello, world!"));
+    exitBtn.onClick(() => this.exit());
 
-    window.activate();
-  }
-
-  override dispose(): void {
-    for (let i = this.#owned.length - 1; i >= 0; i--) this.#owned[i][Symbol.dispose]();
-    this.#owned.length = 0;
-    super.dispose();
+    this.window.activate();
   }
 }
 
 enablePerMonitorDpiAwareness();
 roInitialize(RO_INIT_SINGLETHREADED);
 using _ = bootstrapWindowsAppRuntime();
-
-const apps: App[] = [];
-try {
-  Application.start(() => {
-    apps.push(new App());
-  });
-} finally {
-  for (const app of apps) app.dispose();
-}
+Application.start(() => {
+  new App();
+});

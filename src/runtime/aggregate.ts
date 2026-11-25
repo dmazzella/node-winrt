@@ -63,6 +63,19 @@ export interface WinRTAggregate extends Disposable {
   dispose(): void;
 }
 
+interface ManagedWinRTAggregate extends WinRTAggregate {
+  /** Drop the temporary creation reference once `createComposed()` has AddRef'd the outer object. */
+  releaseInitialRef(): void;
+  /** Called by `WinRTObject.dispose()` right before releasing `this.raw`. */
+  beginWrapperDispose(): void;
+  /** Called by `WinRTObject.dispose()` right after releasing `this.raw` to synchronously finalize when unreferenced. */
+  endWrapperDispose(): void;
+}
+
+// Keeps aggregated outer COM objects (and their override callbacks / subclass instances)
+// alive while external WinRT/COM holders retain references beyond the JS wrapper's own ref.
+const liveAggregates = new Set<WinRTAggregate>();
+
 /**
  * Create a generic COM-aggregating outer `IInspectable` for subclassing any
  * WinRT `[Composable]` runtime class (e.g. `Application`, `Page`, `UserControl`,
@@ -72,10 +85,25 @@ export interface WinRTAggregate extends Disposable {
  */
 export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggregate {
   let refCount = 1;
+  let pinThreshold = 1;
+  let inWrapperDispose = false;
   let disposed = false;
   let innerUnknown: COMPointer<typeof IUnknownRaw> | null = null;
   const keepAlive: unknown[] = [];
   const callbacks: Array<{ release?: () => void }> = [];
+  let aggregate!: ManagedWinRTAggregate;
+
+  const syncPin = (): void => {
+    if (disposed) {
+      liveAggregates.delete(aggregate);
+      return;
+    }
+    if (refCount > pinThreshold) {
+      liveAggregates.add(aggregate);
+    } else {
+      liveAggregates.delete(aggregate);
+    }
+  };
 
   const makeComBlock = (slotCallbacks: ReadonlyArray<{ readonly pointer: bigint; release?: () => void }>): bigint => {
     const VtableType = array(c_void_p, slotCallbacks.length);
@@ -114,6 +142,7 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
 
     if (iid === IID_IUnknown || iid === IID_IInspectable) {
       refCount++;
+      syncPin();
       writeOutPointer(outAddr, outerInspectableAddr);
       return S_OK;
     }
@@ -121,6 +150,7 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
     const overrideAddr = overrideBlocks.get(iid);
     if (overrideAddr !== undefined) {
       refCount++;
+      syncPin();
       writeOutPointer(outAddr, overrideAddr);
       return S_OK;
     }
@@ -144,8 +174,26 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
     return E_NOINTERFACE;
   });
 
-  const addRefCb = WINFUNCTYPE(c_uint32, c_void_p)(() => ++refCount);
-  const releaseCb = WINFUNCTYPE(c_uint32, c_void_p)(() => Math.max(0, --refCount));
+  const addRefCb = WINFUNCTYPE(
+    c_uint32,
+    c_void_p,
+  )(() => {
+    refCount++;
+    syncPin();
+    return refCount;
+  });
+  const releaseCb = WINFUNCTYPE(
+    c_uint32,
+    c_void_p,
+  )(() => {
+    if (refCount > 0) refCount--;
+    syncPin();
+    if (refCount === 0 && !disposed && !inWrapperDispose) {
+      // Defer releasing libffi closures until this native Release() frame has returned.
+      queueMicrotask(dispose);
+    }
+    return refCount;
+  });
   const getIidsCb = WINFUNCTYPE(
     c_int32,
     c_void_p,
@@ -219,6 +267,7 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
+    liveAggregates.delete(aggregate);
     if (innerUnknown && !innerUnknown.released) {
       innerUnknown.Release();
       innerUnknown = null;
@@ -238,12 +287,30 @@ export function createWinRTAggregate(options: WinRTAggregateOptions): WinRTAggre
     keepAlive.length = 0;
   };
 
-  return {
+  aggregate = {
     outerAddress: outerInspectableAddr,
     attachInner,
     dispose,
     [Symbol.dispose]: dispose,
+    releaseInitialRef(): void {
+      if (refCount > 1) refCount--;
+      syncPin();
+    },
+    beginWrapperDispose(): void {
+      inWrapperDispose = true;
+      pinThreshold = 0;
+      syncPin();
+    },
+    endWrapperDispose(): void {
+      inWrapperDispose = false;
+      syncPin();
+      if (refCount === 0 && !disposed) {
+        dispose();
+      }
+    },
   };
+
+  return aggregate;
 }
 
 export interface WinRTSubclassOptions {
@@ -326,6 +393,7 @@ export function prepareWinRTSubclass<T extends WinRTObject>(
     throw new Error(`createComposed(${className}) returned NULL`);
   }
   aggregate.attachInner(composed.inner);
+  (aggregate as ManagedWinRTAggregate).releaseInitialRef();
   return { pointer: composed.instance.raw, aggregate, selfRef };
 }
 

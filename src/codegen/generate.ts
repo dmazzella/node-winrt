@@ -1270,32 +1270,23 @@ function emitClassDef(ctx: GenerationContext, cls: WinRTClassDef): string[] {
         const pVarList = eventParamTypes.map((_, i) => `p${i}$`).join(", ");
         const wrapStmts = mappedParams.map((p) => p.wrapLine).join(" ");
         const callBody = cleanups.length > 0 ? `${wrapStmts} try { callback(${pVarList}); } finally { ${cleanups.join(" ")} }` : `${wrapStmts} callback(${pVarList});`;
-        const guardedCb = `(${rawParamList}) => { if (removed$ || this.released) return; ${callBody} }`;
+        const guardedCb = `(${rawParamList}) => { if (removed$) return; ${callBody} }`;
         const factoryCall = arity === 2 ? `winrt$.createTypedEventHandler(${JSON.stringify(handlerIid)}, ${guardedCb})` : `winrt$.createDelegateHandler(${JSON.stringify(handlerIid)}, ${arity}, (${guardedCb}) as (...args: bigint[]) => void)`;
         lines.push(`  ${jsEventMethod}(callback: ${cbSig}): Disposable & { readonly token: bigint; remove: () => void } {`);
         lines.push(`    let removed$ = false;`);
-        lines.push(`    const handler$ = ${factoryCall};`);
+        lines.push(`    using handler$ = ${factoryCall};`);
         lines.push(`    const token$ = new ${tokenStruct}();`);
-        lines.push(`    try {`);
         for (const l of wrapTarget((t) => [`winrt$.comtypes.sync(${t}).${slotNames[idx]}(handler$.address, token$._buffer);`])) {
-          lines.push(`      ${l}`);
+          lines.push(`    ${l}`);
         }
-        lines.push(`    } catch (err$) {`);
-        lines.push(`      if (!handler$.released) handler$.Release();`);
-        lines.push(`      throw err$;`);
-        lines.push(`    }`);
         lines.push(`    const regToken$ = BigInt(token$.Value);`);
         lines.push(`    const remove = (): void => {`);
         lines.push(`      if (removed$) return;`);
         lines.push(`      removed$ = true;`);
-        lines.push(`      try {`);
-        lines.push(`        if (!this.released) {`);
+        lines.push(`      if (!this.released) {`);
         for (const l of wrapTarget((t) => [`winrt$.comtypes.sync(${t}).${removeSlot}(token$);`])) {
-          lines.push(`          ${l}`);
+          lines.push(`        ${l}`);
         }
-        lines.push(`        }`);
-        lines.push(`      } finally {`);
-        lines.push(`        if (!handler$.released) handler$.Release();`);
         lines.push(`      }`);
         lines.push(`    };`);
         lines.push(`    return { token: regToken$, remove, [globalThis.Symbol.dispose]: remove };`);

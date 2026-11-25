@@ -50,11 +50,11 @@ enablePerMonitorDpiAwareness();
 roInitialize(RO_INIT_SINGLETHREADED);
 using _runtime = bootstrapWindowsAppRuntime();
 
-const owned: Disposable[] = [];
-const keep = <T extends Disposable>(item: T): T => (owned.push(item), item);
 let launchError: unknown = null;
 
 class GalleryApp extends Application {
+  window?: Window;
+
   constructor() {
     using provider = new XamlControlsXamlMetaDataProvider();
     super({
@@ -75,7 +75,7 @@ class GalleryApp extends Application {
     merged.append(xcr);
 
     // Create native WinUI 3 Window with Mica backdrop & Per-Monitor V2 DPI
-    const window = keep(new Window());
+    const window = (this.window = new Window());
     window.title = "WinUI 3 Controls Gallery — @node-ctypes/winrt";
     using backdrop = new MicaBackdrop();
     window.systemBackdrop = backdrop;
@@ -86,18 +86,24 @@ class GalleryApp extends Application {
 
     // Load declarative Fluent XAML UI
     using rawRoot = XamlReader.load(readFileSync(join(__dirname, "MainWindow.xaml"), "utf8"))!;
-    const nav = keep(rawRoot.as(NavigationView));
+    const nav = rawRoot.as(NavigationView);
     window.content = nav;
 
-    const get = <T extends WinRTObject>(name: string, Cls: { new (ptr: any): T; readonly defaultInterface: any }): T => {
+    const find = <T extends WinRTObject>(name: string, Cls: { new (ptr: any): T; readonly defaultInterface: any }): T => {
       using raw = nav.findName(name)!;
-      return keep(raw.as(Cls));
+      return raw.as(Cls);
+    };
+    const wire = <T extends WinRTObject>(name: string, Cls: { new (ptr: any): T; readonly defaultInterface: any }, fn: (ctrl: T) => void): void => {
+      using ctrl = find(name, Cls);
+      fn(ctrl);
     };
 
     // Header & StatusBar
-    const pageTitle = get("PageTitle", TextBlock);
-    const statusBar = get("StatusBar", InfoBar);
-    get("RuntimeSubtitle", TextBlock).text = `Node ${process.version} (${process.arch}) | DPI ${Math.round(dpiScale * 100)}% | EXTERNAL_BUFFERS=${EXTERNAL_BUFFERS} | Native WinUI 3 + Mica`;
+    const pageTitle = find("PageTitle", TextBlock);
+    const statusBar = find("StatusBar", InfoBar);
+    wire("RuntimeSubtitle", TextBlock, (tb) => {
+      tb.text = `Node ${process.version} (${process.arch}) | DPI ${Math.round(dpiScale * 100)}% | EXTERNAL_BUFFERS=${EXTERNAL_BUFFERS} | Native WinUI 3 + Mica`;
+    });
 
     const status = (title: string, message: string, severity: InfoBarSeverity = InfoBarSeverity.Informational): void => {
       statusBar.severity = severity;
@@ -107,85 +113,81 @@ class GalleryApp extends Application {
 
     // NavigationView page switching
     const pages = [
-      { item: get("NavBasic", NavigationViewItem), view: get("BasicPage", ScrollViewer), title: "Basic Input" },
-      { item: get("NavText", NavigationViewItem), view: get("TextPage", ScrollViewer), title: "Text & Numbers" },
-      { item: get("NavStatus", NavigationViewItem), view: get("StatusPage", ScrollViewer), title: "Status & Layout" },
-      { item: get("NavDateColor", NavigationViewItem), view: get("DateColorPage", ScrollViewer), title: "Date, Time & Color" },
+      { item: find("NavBasic", NavigationViewItem), view: find("BasicPage", ScrollViewer), title: "Basic Input" },
+      { item: find("NavText", NavigationViewItem), view: find("TextPage", ScrollViewer), title: "Text & Numbers" },
+      { item: find("NavStatus", NavigationViewItem), view: find("StatusPage", ScrollViewer), title: "Status & Layout" },
+      { item: find("NavDateColor", NavigationViewItem), view: find("DateColorPage", ScrollViewer), title: "Date, Time & Color" },
     ];
-    keep(
-      nav.onSelectionChanged(() => {
-        using selected = nav.selectedItem;
-        if (!selected) return;
-        for (const p of pages) {
-          const active = p.item.raw.isSameObject(selected.raw);
-          p.view.visibility = active ? Visibility.Visible : Visibility.Collapsed;
-          if (active) pageTitle.text = p.title;
-        }
-      }),
-    );
+    nav.onSelectionChanged(() => {
+      using selected = nav.selectedItem;
+      if (!selected) return;
+      for (const p of pages) {
+        const active = p.item.raw.isSameObject(selected.raw);
+        p.view.visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        if (active) pageTitle.text = p.title;
+      }
+    });
 
     // Basic Input controls
     let clicks = 0;
     let repeats = 0;
-    const slider = get("DemoSlider", Slider);
-    const progress = get("DemoProgress", ProgressBar);
-    const rating = get("DemoRating", RatingControl);
-    const featureSwitch = get("FeatureSwitch", ToggleSwitch);
-    const autoSave = get("MenuAutoSave", ToggleMenuFlyoutItem);
+    const slider = find("DemoSlider", Slider);
+    const progress = find("DemoProgress", ProgressBar);
+    const rating = find("DemoRating", RatingControl);
+    const featureSwitch = find("FeatureSwitch", ToggleSwitch);
+    const autoSave = find("MenuAutoSave", ToggleMenuFlyoutItem);
 
-    keep(get("AccentBtn", Button).onClick(() => status("Accent Button", `Clicked ${++clicks} time(s).`, InfoBarSeverity.Success)));
-    keep(get("StandardBtn", Button).onClick(() => status("Standard Button", "Standard Fluent button clicked.")));
-    keep(get("ToggleBtn", ToggleButton).onChecked(() => status("ToggleButton", "ON", InfoBarSeverity.Success)));
-    keep(get("ToggleBtn", ToggleButton).onUnchecked(() => status("ToggleButton", "OFF")));
-    keep(get("RepeatBtn", RepeatButton).onClick(() => status("RepeatButton", `Continuous fire #${++repeats}.`)));
-    keep(get("DemoSplitBtn", SplitButton).onClick(() => status("SplitButton", "Primary action clicked.")));
-    keep(get("MenuNew", MenuFlyoutItem).onClick(() => status("DropDownButton", "New File.")));
-    keep(get("MenuSave", MenuFlyoutItem).onClick(() => status("DropDownButton", "Saved.", InfoBarSeverity.Success)));
-    keep(autoSave.onClick(() => status("DropDownButton", `Auto-Save: ${autoSave.isChecked}`)));
-    keep(get("CheckLogging", CheckBox).onChecked(() => status("CheckBox", "Logging enabled.")));
-    keep(get("CheckLogging", CheckBox).onUnchecked(() => status("CheckBox", "Logging disabled.", InfoBarSeverity.Warning)));
-    keep(get("CheckMirror", CheckBox).onChecked(() => status("CheckBox", "Mirror buffer checked.")));
-    keep(get("CheckMirror", CheckBox).onUnchecked(() => status("CheckBox", "Mirror buffer unchecked.")));
-    keep(get("RadioStandard", RadioButton).onChecked(() => status("RadioButton", "Density: Standard.")));
-    keep(get("RadioCompact", RadioButton).onChecked(() => status("RadioButton", "Density: Compact.")));
-    keep(featureSwitch.onToggled(() => status("ToggleSwitch", featureSwitch.isOn ? "Enabled" : "Disabled")));
-    keep(
-      slider.onValueChanged(() => {
-        progress.value = slider.value;
-        status("Slider + ProgressBar", `${Math.round(slider.value)}%`);
-      }),
-    );
-    keep(rating.onValueChanged(() => status("RatingControl", `${rating.value} / 5 stars`, InfoBarSeverity.Success)));
+    wire("AccentBtn", Button, (b) => b.onClick(() => status("Accent Button", `Clicked ${++clicks} time(s).`, InfoBarSeverity.Success)));
+    wire("StandardBtn", Button, (b) => b.onClick(() => status("Standard Button", "Standard Fluent button clicked.")));
+    wire("ToggleBtn", ToggleButton, (b) => {
+      b.onChecked(() => status("ToggleButton", "ON", InfoBarSeverity.Success));
+      b.onUnchecked(() => status("ToggleButton", "OFF"));
+    });
+    wire("RepeatBtn", RepeatButton, (b) => b.onClick(() => status("RepeatButton", `Continuous fire #${++repeats}.`)));
+    wire("DemoSplitBtn", SplitButton, (b) => b.onClick(() => status("SplitButton", "Primary action clicked.")));
+    wire("MenuNew", MenuFlyoutItem, (m) => m.onClick(() => status("DropDownButton", "New File.")));
+    wire("MenuSave", MenuFlyoutItem, (m) => m.onClick(() => status("DropDownButton", "Saved.", InfoBarSeverity.Success)));
+    autoSave.onClick(() => status("DropDownButton", `Auto-Save: ${autoSave.isChecked}`));
+    wire("CheckLogging", CheckBox, (c) => {
+      c.onChecked(() => status("CheckBox", "Logging enabled."));
+      c.onUnchecked(() => status("CheckBox", "Logging disabled.", InfoBarSeverity.Warning));
+    });
+    wire("CheckMirror", CheckBox, (c) => {
+      c.onChecked(() => status("CheckBox", "Mirror buffer checked."));
+      c.onUnchecked(() => status("CheckBox", "Mirror buffer unchecked."));
+    });
+    wire("RadioStandard", RadioButton, (r) => r.onChecked(() => status("RadioButton", "Density: Standard.")));
+    wire("RadioCompact", RadioButton, (r) => r.onChecked(() => status("RadioButton", "Density: Compact.")));
+    featureSwitch.onToggled(() => status("ToggleSwitch", featureSwitch.isOn ? "Enabled" : "Disabled"));
+    slider.onValueChanged(() => {
+      progress.value = slider.value;
+      status("Slider + ProgressBar", `${Math.round(slider.value)}%`);
+    });
+    rating.onValueChanged(() => status("RatingControl", `${rating.value} / 5 stars`, InfoBarSeverity.Success));
 
     // Text, Numbers & Collections
-    const textBox = get("DemoTextBox", TextBox);
-    const numberBox = get("DemoNumberBox", NumberBox);
-    const combo = get("DemoCombo", ComboBox);
-    const list = get("DemoList", ListView);
-    const ring = get("DemoRing", ProgressRing);
-    const ringToggle = get("RingToggle", ToggleSwitch);
+    const textBox = find("DemoTextBox", TextBox);
+    const numberBox = find("DemoNumberBox", NumberBox);
+    const combo = find("DemoCombo", ComboBox);
+    const list = find("DemoList", ListView);
+    const ring = find("DemoRing", ProgressRing);
+    const ringToggle = find("RingToggle", ToggleSwitch);
 
-    keep(textBox.onTextChanged(() => status("TextBox", `Live text: "${textBox.text}"`)));
-    keep(numberBox.onValueChanged(() => status("NumberBox", `Value: ${numberBox.value}`)));
-    keep(combo.onSelectionChanged(() => status("ComboBox", `Selected index: ${combo.selectedIndex}`)));
-    keep(list.onSelectionChanged(() => status("ListView", `Selected row #${list.selectedIndex}`)));
-    keep(
-      ringToggle.onToggled(() => {
-        ring.isActive = ringToggle.isOn;
-        status("ProgressRing", ring.isActive ? "Active" : "Paused");
-      }),
-    );
+    textBox.onTextChanged(() => status("TextBox", `Live text: "${textBox.text}"`));
+    numberBox.onValueChanged(() => status("NumberBox", `Value: ${numberBox.value}`));
+    combo.onSelectionChanged(() => status("ComboBox", `Selected index: ${combo.selectedIndex}`));
+    list.onSelectionChanged(() => status("ListView", `Selected row #${list.selectedIndex}`));
+    ringToggle.onToggled(() => {
+      ring.isActive = ringToggle.isOn;
+      status("ProgressRing", ring.isActive ? "Active" : "Paused");
+    });
 
     window.activate();
   }
 }
 
-try {
-  Application.start(() => {
-    keep(new GalleryApp());
-  });
-} finally {
-  for (let i = owned.length - 1; i >= 0; i--) owned[i][Symbol.dispose]();
-}
+Application.start(() => {
+  new GalleryApp();
+});
 
 if (launchError) throw launchError;

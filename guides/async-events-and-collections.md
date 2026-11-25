@@ -32,7 +32,7 @@ using subscription = watcher.onReceived((_sender, args) => {
 
 - `sender` and `args` are automatically wrapped in their projected `WinRTObject` subclasses as borrowed references and released automatically after the callback returns (use `.as(Class)` to retain an owned reference beyond the callback).
 - Delegates are free-threaded (`IAgileObject`) and cached per IID so repeated subscriptions do not rebuild vtables.
-- If `add_<Event>` fails, the temporary COM delegate is released immediately so it never leaks.
+- `on<Event>()` releases its temporary initial COM pointer immediately after `add_<Event>` succeeds — the WinRT event source holds the COM reference and keeps the JS delegate alive automatically until either `subscription.remove()` / `using` unsubscribes or the native control/source is destroyed. You can attach events on a temporary `using` control wrapper without retaining either the wrapper or the subscription handle.
 - Methods taking a WinRT delegate parameter directly (such as `Application.start(callback)`) accept a plain JavaScript function directly, automatically wrapped via `createDelegateHandler`.
 
 ## Collections, nullable values and byte arrays
